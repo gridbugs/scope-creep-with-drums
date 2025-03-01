@@ -1,11 +1,11 @@
-use bevy::{prelude::*, window::WindowResolution};
+use bevy::{math::VectorSpace, prelude::*, window::WindowResolution};
 use caw::prelude::*;
 use caw_bevy::BevyInput;
 use geom::*;
 use grid_2d::Coord;
 use procgen::{Map1, Map2};
 use rand::{Rng, SeedableRng, rngs::StdRng};
-use std::collections::VecDeque;
+use std::{cmp::Ordering, collections::VecDeque};
 
 const MAX_NUM_SAMPLES: usize = 4_000;
 
@@ -310,6 +310,68 @@ impl PlayerCharacter {
     }
 }
 
+struct ConnectedPoint {
+    point: Vec2,
+    neighbours: Vec<Vec2>,
+}
+
+enum ConnectedPointClassification {
+    Stop,
+    ContinueLeft,
+    ContinueRight,
+}
+
+impl ConnectedPoint {
+    fn vec_from_linestrip(linestrip: &[Vec2]) -> Vec<Self> {
+        if linestrip.is_empty() {
+            return Vec::new();
+        }
+        if linestrip.len() >= 3 && linestrip[0] == linestrip[linestrip.len() - 1] {
+            linestrip
+                .iter()
+                .enumerate()
+                .map(|(i, &point)| {
+                    let neighbours = vec![
+                        linestrip[if i == 0 { linestrip.len() - 1 } else { i - 1 }],
+                        linestrip[if i == linestrip.len() - 1 { 0 } else { i + 1 }],
+                    ];
+                    Self { point, neighbours }
+                })
+                .collect()
+        } else {
+            linestrip
+                .iter()
+                .enumerate()
+                .map(|(i, &point)| {
+                    let mut neighbours = Vec::new();
+                    if i > 0 {
+                        neighbours.push(linestrip[i - 1]);
+                    }
+                    if i < linestrip.len() - 1 {
+                        neighbours.push(linestrip[i + 1]);
+                    }
+                    Self { point, neighbours }
+                })
+                .collect()
+        }
+    }
+
+    // Does a ray cast from the eye to `self` stop at `self` or continue past it. Equivalent to
+    // testing whether all neighbouring points lie on the same side of the eye->self vector.
+    // Operates in screen space where the eye is at the origin and is looking in the (0, 1)
+    // direction.
+    fn classify_screen_space(&self) -> ConnectedPointClassification {
+        let this_ratio = self.point.x / self.point.y;
+        if self.neighbours.iter().all(|n| (n.x / n.y) < this_ratio) {
+            ConnectedPointClassification::ContinueLeft
+        } else if self.neighbours.iter().all(|n| (n.x / n.y) > this_ratio) {
+            ConnectedPointClassification::ContinueRight
+        } else {
+            ConnectedPointClassification::Stop
+        }
+    }
+}
+
 #[derive(Resource)]
 struct State {
     map1: Map1,
@@ -450,7 +512,7 @@ fn debug_render_map2_pruned(state: Res<State>, mut gizmos: Gizmos) {
         );
         for v in wall_strip {
             if v.y >= 0. {
-                gizmos.circle_2d(transform(v), 2., Color::srgb(0., 1., 1.));
+                gizmos.circle_2d(transform(v), 1., Color::srgb(0., 1., 1.));
             }
         }
     }
@@ -458,6 +520,153 @@ fn debug_render_map2_pruned(state: Res<State>, mut gizmos: Gizmos) {
         vec![transform(Vec2::ZERO), transform(Vec2::new(0., 5.))],
         Color::srgb(1., 0., 0.),
     );
+}
+
+fn seg2s_from_linestrip(linestrip: &[Vec2]) -> Vec<Seg2> {
+    linestrip
+        .windows(2)
+        .map(|w| Seg2::new(w[0], w[1]))
+        .collect::<Vec<_>>()
+}
+
+#[derive(Debug, Clone, Copy)]
+enum VertexProjectionCeiling {
+    BothTop,
+    LeftWall(Vec2),
+    RightWall(Vec2),
+}
+
+#[derive(Debug)]
+struct VertexProjection {
+    screen_space_coord: Vec2,
+    ceiling: VertexProjectionCeiling,
+}
+
+impl VertexProjection {
+    fn left_screen_space_coord(&self) -> Vec2 {
+        match self.ceiling {
+            VertexProjectionCeiling::BothTop | VertexProjectionCeiling::RightWall(_) => {
+                self.screen_space_coord
+            }
+            VertexProjectionCeiling::LeftWall(left) => left,
+        }
+    }
+    fn right_screen_space_coord(&self) -> Vec2 {
+        match self.ceiling {
+            VertexProjectionCeiling::BothTop | VertexProjectionCeiling::LeftWall(_) => {
+                self.screen_space_coord
+            }
+            VertexProjectionCeiling::RightWall(right) => right,
+        }
+    }
+}
+
+#[allow(unused)]
+fn debug_render_map2_3d(state: Res<State>, mut gizmos: Gizmos) {
+    let pruned_walls = state.prune_geometry();
+    let all_walls = pruned_walls
+        .iter()
+        .flat_map(|linestrip| seg2s_from_linestrip(linestrip))
+        .collect::<Vec<_>>();
+    let connected_points = pruned_walls
+        .iter()
+        .flat_map(|linestrip| ConnectedPoint::vec_from_linestrip(linestrip))
+        .collect::<Vec<_>>();
+    let visible_connected_points = connected_points
+        .iter()
+        .filter(|cp| {
+            let ray_from_eye = Seg2::new(Vec2::ZERO, cp.point);
+            !all_walls
+                .iter()
+                .filter(|wall| {
+                    // Prevent the ray from being tested for intersections with the walls that its vertex
+                    // is part of.
+                    !(wall.start == cp.point || wall.end == cp.point)
+                })
+                .any(|wall| ray_from_eye.intersect(wall).is_some())
+        })
+        .collect::<Vec<_>>();
+    let project_to_wall = |v: Vec2| {
+        let v_norm = v.normalize();
+        let max_depth_test_dist = 1000.;
+        let distant_point = v_norm * max_depth_test_dist;
+        let ray_from_eye = Seg2::new(Vec2::ZERO, distant_point);
+        all_walls
+            .iter()
+            .filter(|wall| {
+                // Prevent the ray from being tested for intersections with the walls that its vertex
+                // is part of.
+                !(wall.start == v || wall.end == v)
+            })
+            .filter_map(|w| w.intersect(&ray_from_eye))
+            .min_by(|a, b| {
+                if a.length() < b.length() {
+                    Ordering::Less
+                } else if a.length() > b.length() {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            })
+            .unwrap_or(distant_point)
+    };
+    let mut projected_points = visible_connected_points
+        .iter()
+        .map(|cp| {
+            let ceiling = match cp.classify_screen_space() {
+                ConnectedPointClassification::Stop => VertexProjectionCeiling::BothTop,
+                ConnectedPointClassification::ContinueLeft => {
+                    VertexProjectionCeiling::LeftWall(project_to_wall(cp.point))
+                }
+                ConnectedPointClassification::ContinueRight => {
+                    VertexProjectionCeiling::RightWall(project_to_wall(cp.point))
+                }
+            };
+            VertexProjection {
+                screen_space_coord: cp.point,
+                ceiling,
+            }
+        })
+        .collect::<Vec<_>>();
+    projected_points.sort_by(|a, b| {
+        let ratio_a = a.screen_space_coord.x / a.screen_space_coord.y;
+        let ratio_b = b.screen_space_coord.x / b.screen_space_coord.y;
+        if ratio_a < ratio_b {
+            Ordering::Less
+        } else if ratio_a > ratio_b {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        }
+    });
+
+    let scale_y = 200.;
+    let scale_x = 300.;
+    let screen_space_project = |v: Vec2| {
+        let x = scale_x * v.x / v.y;
+        let y = scale_y / v.y;
+        Vec2 { x, y }
+    };
+    for projected_point in projected_points.iter() {
+        let start = screen_space_project(projected_point.screen_space_coord);
+        let end = Vec2::new(start.x, -start.y);
+        gizmos.line_2d(start, end, Color::srgb(0., 1., 0.));
+    }
+    for w in projected_points.windows(2) {
+        let left = screen_space_project(w[0].left_screen_space_coord());
+        let right = screen_space_project(w[1].right_screen_space_coord());
+        gizmos.line_2d(left, right, Color::srgb(0., 1., 0.));
+        let left = Vec2::new(left.x, -left.y);
+        let right = Vec2::new(right.x, -right.y);
+        gizmos.line_2d(left, right, Color::srgb(0., 1., 0.));
+    }
+
+    let wall_length = 5.;
+    let offset = TOP_LEFT_OFFSET + Vec2::new(640., -140.);
+    let transform = |v| v * wall_length + offset;
+    for cp in visible_connected_points {
+        gizmos.circle_2d(transform(cp.point), 2., Color::srgb(1., 1., 0.));
+    }
 }
 
 fn debug_update(mut state: ResMut<State>, keys: Res<ButtonInput<KeyCode>>) {
@@ -505,6 +714,7 @@ fn main() {
                 debug_render_map1,
                 debug_render_map2,
                 debug_render_map2_pruned,
+                debug_render_map2_3d,
                 debug_update,
             ),
         )
