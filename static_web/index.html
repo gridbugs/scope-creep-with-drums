@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+	<head>
+		<title>Scope Creep</title>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0"/>
+		<style>
+body {
+	margin: 0;
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	height: 100vh;
+	background-color: grey;
+}
+		</style>
+	</head>
+	<body>
+		<button id="start">Play!</button>
+		<script type="module">
+			import init from './scope-creep.js'
+			const startButton = document.querySelector('#start');
+			startButton.addEventListener('click', async () => {
+				startButton.remove();
+				const loading = document.createElement('span');
+				loading.innerHTML = "Loading...";
+				document.querySelector('body').appendChild(loading);
+				try {
+					await init();
+				} finally {
+					loading.remove();
+				}
+			});
+		</script>
+	</body>
+</html>
