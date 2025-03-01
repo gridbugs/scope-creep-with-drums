@@ -239,6 +239,14 @@ impl Map1 {
             let (start, ds) = blob_to_outside_directions(&blob);
             wall_strips.push(cardinal_directions_to_linestrip(start, &ds));
         }
+        /*
+        let wall_strips = vec![vec![
+            Vec2::new(0., 0.),
+            Vec2::new(20., 0.),
+            Vec2::new(20., 20.),
+            Vec2::new(0., 20.),
+            Vec2::new(0., 0.),
+        ]];*/
         Map2 { wall_strips }
     }
 }
