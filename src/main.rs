@@ -1,9 +1,14 @@
-use bevy::prelude::*;
+use bevy::{input::keyboard::KeyboardInput, prelude::*};
 use caw::prelude::*;
 use caw_bevy::BevyInput;
+use grid_2d::Coord;
+use procgen::Map1;
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::collections::VecDeque;
 
 const MAX_NUM_SAMPLES: usize = 4_000;
+
+mod procgen;
 
 #[derive(Clone, Copy, Debug)]
 struct Seg3 {
@@ -269,19 +274,82 @@ fn render_scope(scope_state: Res<ScopeState>, window: Query<&Window>, mut gizmos
     }
 }
 
+#[derive(Resource)]
+struct State {
+    map1: Map1,
+}
+
+impl State {
+    fn new() -> Self {
+        let map1 = Map1::new();
+        Self { map1 }
+    }
+
+    fn reset(&mut self) {
+        let mut seed_rng = rand::rng();
+        let seed = seed_rng.random();
+        log::info!("seed: {:?}", seed);
+        let mut rng = StdRng::from_seed(seed);
+        self.map1.generate(&mut rng);
+    }
+}
+
+fn setup_state(world: &mut World) {
+    let mut state = State::new();
+    state.reset();
+    world.insert_resource(state);
+}
+
+fn coord_to_vec(coord: Coord) -> Vec2 {
+    Vec2::new(coord.x as f32, coord.y as f32)
+}
+
+const DISPLAY_WIDTH: f32 = 960.;
+const DISPLAY_HEIGHT: f32 = 720.;
+
+fn debug_vec_to_canvas_style_vec(vec2: Vec2) -> Vec2 {
+    Vec2 {
+        x: vec2.x - 231.,
+        y: 170. - vec2.y,
+    }
+}
+
+fn debug_render_map1(state: Res<State>, mut gizmos: Gizmos) {
+    let cell_size = Vec2::new(5., 5.);
+    for (coord, &cell) in state.map1.grid.enumerate() {
+        if cell {
+            gizmos.rect_2d(
+                debug_vec_to_canvas_style_vec(coord_to_vec(coord) * cell_size),
+                cell_size,
+                Color::srgb(0., 1., 0.),
+            );
+        }
+    }
+}
+
+fn debug_update(mut state: ResMut<State>, keys: Res<ButtonInput<KeyCode>>) {
+    if keys.just_pressed(KeyCode::KeyR) {
+        state.reset();
+    }
+}
+
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Oscillographics Cube".into(),
-                resolution: (960., 720.).into(),
+        .add_plugins(
+            DefaultPlugins.set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "S:w
+                    cope Creep"
+                        .into(),
+                    resolution: (DISPLAY_WIDTH, DISPLAY_HEIGHT).into(),
+                    ..default()
+                }),
                 ..default()
             }),
-            ..default()
-        }))
-        .add_systems(Startup, (setup_caw_player, setup))
+        )
+        .add_systems(Startup, (setup_caw_player, setup, setup_state))
         .insert_resource(ClearColor(Color::srgb(0., 0., 0.)))
         .add_systems(FixedFirst, caw_tick)
-        .add_systems(Update, (BevyInput::update, render_scope))
+        .add_systems(Update, (BevyInput::update, debug_render_map1, debug_update))
         .run();
 }

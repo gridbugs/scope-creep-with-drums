@@ -7,3 +7,8 @@ edition = "2024"
 bevy = "0.15"
 caw = { version = "0.7", features = ["player", "web"] }
 caw_bevy = "0.1"
+grid_2d = "0.15"
+direction = "0.18"
+rand = "0.9"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+log = "0.4"

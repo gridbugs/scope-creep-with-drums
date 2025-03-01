@@ -19,12 +19,13 @@
         wasm-bindgen-cli = rustPlatform.buildRustPackage {
           pname = "wasm-bindgen-cli";
           version = "0.2.100";
+          useFetchCargoVendor = true;
           src = pkgs.fetchCrate {
             pname = "wasm-bindgen-cli";
             version = "0.2.100";
             sha256 = "sha256-3RJzK7mkYFrs7C/WkhW9Rr4LdP5ofb2FdYGz1P7Uxog=";
           };
-          cargoSha256 = "sha256-tD0OY2PounRqsRiFh8Js5nyknQ809ZcHMvCOLrvYHRE=";
+          cargoHash = "sha256-qsO12332HSjWCVKtf1cUePWWb9IdYUmT+8OPj/XP2WE=";
         };
       in with pkgs; {
         devShell = mkShell rec {
