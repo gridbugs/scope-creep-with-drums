@@ -1,4 +1,5 @@
-use direction::{Directions, DirectionsCardinal};
+use bevy::math::Vec2;
+use direction::{CardinalDirection, CardinalDirections, Direction, Directions, DirectionsCardinal};
 use grid_2d::{Coord, Grid, Size};
 use rand::Rng;
 use std::{
@@ -6,8 +7,76 @@ use std::{
     mem,
 };
 
+use crate::coord_to_vec;
+
 pub struct Map1 {
     pub grid: Grid<bool>,
+}
+
+fn blob_to_outside_directions(blob: &HashSet<Coord>) -> (Coord, Vec<CardinalDirection>) {
+    assert!(!blob.is_empty());
+    let in_blob = |coord| blob.contains(&coord);
+    // Find a cell with nothing above it or to its left.
+    let start = *blob
+        .iter()
+        .filter(|&&coord| {
+            !in_blob(coord + Direction::North.coord()) && !in_blob(coord + Direction::West.coord())
+        })
+        .min_by_key(|coord| coord.y)
+        .unwrap();
+    // The starting cell has nothing above it so it has an outside edge on its top. We'll start by
+    // moving east along this edge.
+    let mut current_direction = CardinalDirection::East;
+    let mut current = start;
+    let mut ret = vec![current_direction];
+    loop {
+        if in_blob(current + current_direction.left45().coord()) {
+            current += current_direction.left45().coord();
+            current_direction = current_direction.left90();
+        } else if in_blob(current + current_direction.coord()) {
+            current += current_direction.coord();
+            // current_direction is unchanged
+        } else {
+            // current is unchanged
+            current_direction = current_direction.right90();
+        }
+        // we've made it back to the start
+        if current == start && current_direction == CardinalDirection::East {
+            break;
+        }
+        ret.push(current_direction);
+    }
+    (start, ret)
+}
+
+fn cardinal_direction_to_unit_vec2(direction: CardinalDirection) -> Vec2 {
+    match direction {
+        CardinalDirection::North => Vec2::new(0., -1.),
+        CardinalDirection::East => Vec2::new(1., 0.),
+        CardinalDirection::South => Vec2::new(0., 1.),
+        CardinalDirection::West => Vec2::new(-1., 0.),
+    }
+}
+
+fn cardinal_directions_to_linestrip(start: Coord, directions: &[CardinalDirection]) -> Vec<Vec2> {
+    let mut grouped_directions = Vec::new();
+    for &d in directions {
+        if let Some(&mut (ref last_d, ref mut count)) = grouped_directions.last_mut() {
+            if *last_d == d {
+                *count += 1;
+                continue;
+            }
+        }
+        grouped_directions.push((d, 1));
+    }
+    let mut cursor = coord_to_vec(start);
+    let mut ret = vec![cursor];
+    for (d, count) in grouped_directions {
+        let v = cardinal_direction_to_unit_vec2(d) * count as f32;
+        cursor += v;
+        ret.push(cursor);
+    }
+    ret
 }
 
 impl Map1 {
@@ -101,9 +170,10 @@ impl Map1 {
             for (coord, alive) in self.grid.enumerate_mut() {
                 *alive = !largest.contains(&coord);
             }
-            if largest.len() < 200 {
+            if largest.len() < 250 {
                 continue;
             }
+            log::info!("Open space made up of {} cells.", largest.len());
             break;
         }
     }
@@ -112,7 +182,75 @@ impl Map1 {
         self.generate_cave(rng);
     }
 
-    fn linestrips(&self) {
-        //todo
+    fn open_blob(&self) -> HashSet<Coord> {
+        let start = self
+            .grid
+            .enumerate()
+            .find(|&(_coord, &alive)| !alive)
+            .unwrap()
+            .0;
+        let mut blob = HashSet::new();
+        blob.insert(start);
+        let mut to_visit = VecDeque::new();
+        to_visit.push_back(start);
+        while let Some(coord) = to_visit.pop_front() {
+            for d in CardinalDirections {
+                let neighbour_coord = coord + d.coord();
+                if self.grid.get(neighbour_coord) == Some(&false) && blob.insert(neighbour_coord) {
+                    to_visit.push_back(neighbour_coord);
+                }
+            }
+        }
+        blob
+    }
+
+    fn floating_blobs(&self) -> Vec<HashSet<Coord>> {
+        let mut seen = HashSet::new();
+        let mut ret = Vec::new();
+        for (coord, alive) in self.grid.enumerate() {
+            if !alive || !seen.insert(coord) {
+                continue;
+            }
+            let mut blob = HashSet::new();
+            blob.insert(coord);
+            let mut to_visit = VecDeque::new();
+            to_visit.push_back(coord);
+            while let Some(coord) = to_visit.pop_front() {
+                for d in CardinalDirections {
+                    let neighbour_coord = coord + d.coord();
+                    if self.grid.get(neighbour_coord) == Some(&true) && blob.insert(neighbour_coord)
+                    {
+                        to_visit.push_back(neighbour_coord);
+                    }
+                }
+            }
+            if !blob.contains(&Coord::new(0, 0)) {
+                ret.push(blob);
+            }
+        }
+        ret
+    }
+
+    pub fn to_map2(&self) -> Map2 {
+        let mut wall_strips = Vec::new();
+        let (start, open_directions) = blob_to_outside_directions(&self.open_blob());
+        wall_strips.push(cardinal_directions_to_linestrip(start, &open_directions));
+        for blob in self.floating_blobs() {
+            let (start, ds) = blob_to_outside_directions(&blob);
+            wall_strips.push(cardinal_directions_to_linestrip(start, &ds));
+        }
+        Map2 { wall_strips }
+    }
+}
+
+pub struct Map2 {
+    pub wall_strips: Vec<Vec<Vec2>>,
+}
+
+impl Map2 {
+    pub fn new() -> Self {
+        Self {
+            wall_strips: Vec::new(),
+        }
     }
 }

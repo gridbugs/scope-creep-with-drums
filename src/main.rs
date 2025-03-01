@@ -2,7 +2,7 @@ use bevy::{input::keyboard::KeyboardInput, prelude::*};
 use caw::prelude::*;
 use caw_bevy::BevyInput;
 use grid_2d::Coord;
-use procgen::Map1;
+use procgen::{Map1, Map2};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::collections::VecDeque;
 
@@ -277,12 +277,14 @@ fn render_scope(scope_state: Res<ScopeState>, window: Query<&Window>, mut gizmos
 #[derive(Resource)]
 struct State {
     map1: Map1,
+    map2: Map2,
 }
 
 impl State {
     fn new() -> Self {
         let map1 = Map1::new();
-        Self { map1 }
+        let map2 = Map2::new();
+        Self { map1, map2 }
     }
 
     fn reset(&mut self) {
@@ -291,6 +293,7 @@ impl State {
         log::info!("seed: {:?}", seed);
         let mut rng = StdRng::from_seed(seed);
         self.map1.generate(&mut rng);
+        self.map2 = self.map1.to_map2();
     }
 }
 
@@ -314,6 +317,7 @@ fn debug_vec_to_canvas_style_vec(vec2: Vec2) -> Vec2 {
     }
 }
 
+#[allow(unused)]
 fn debug_render_map1(state: Res<State>, mut gizmos: Gizmos) {
     let cell_size = Vec2::new(5., 5.);
     for (coord, &cell) in state.map1.grid.enumerate() {
@@ -321,9 +325,22 @@ fn debug_render_map1(state: Res<State>, mut gizmos: Gizmos) {
             gizmos.rect_2d(
                 debug_vec_to_canvas_style_vec(coord_to_vec(coord) * cell_size),
                 cell_size,
-                Color::srgb(0., 1., 0.),
+                Color::srgb(1., 1., 0.),
             );
         }
+    }
+}
+
+#[allow(unused)]
+fn debug_render_map2(state: Res<State>, mut gizmos: Gizmos) {
+    let wall_length = 5.;
+    for wall_strip in &state.map2.wall_strips {
+        gizmos.linestrip_2d(
+            wall_strip
+                .iter()
+                .map(|v| debug_vec_to_canvas_style_vec(v * wall_length)),
+            Color::srgb(0., 1., 1.),
+        );
     }
 }
 
@@ -335,21 +352,18 @@ fn debug_update(mut state: ResMut<State>, keys: Res<ButtonInput<KeyCode>>) {
 
 fn main() {
     App::new()
-        .add_plugins(
-            DefaultPlugins.set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "S:w
-                    cope Creep"
-                        .into(),
-                    resolution: (DISPLAY_WIDTH, DISPLAY_HEIGHT).into(),
-                    ..default()
-                }),
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "Scope Creep".into(),
+                resolution: (DISPLAY_WIDTH, DISPLAY_HEIGHT).into(),
                 ..default()
             }),
-        )
+            ..default()
+        }))
         .add_systems(Startup, (setup_caw_player, setup, setup_state))
         .insert_resource(ClearColor(Color::srgb(0., 0., 0.)))
         .add_systems(FixedFirst, caw_tick)
-        .add_systems(Update, (BevyInput::update, debug_render_map1, debug_update))
+        .add_systems(Update, BevyInput::update)
+        .add_systems(Update, (debug_render_map1, debug_render_map2, debug_update))
         .run();
 }
