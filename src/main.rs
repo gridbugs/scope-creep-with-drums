@@ -151,7 +151,7 @@ fn sig(scene: FrameSig<FrameSigVar<RenderedScene>>) -> StereoPair<SigBoxed<f32>>
                         object_renderer.clone().map(|v| v.x) * object_pulse.clone()
                     })
                     .sum::<Sig<_>>();
-                ((world + objects) * post_scale).boxed()
+                ((world + objects) * post_scale).clamp_symetric(0.5).boxed()
             }
             Channel::Right => {
                 let world = base
@@ -165,7 +165,7 @@ fn sig(scene: FrameSig<FrameSigVar<RenderedScene>>) -> StereoPair<SigBoxed<f32>>
                         object_renderer.clone().map(|v| v.y) * object_pulse.clone()
                     })
                     .sum::<Sig<_>>();
-                ((world + objects) * post_scale).boxed()
+                ((world + objects) * post_scale).clamp_symetric(0.5).boxed()
             }
         }
     })
