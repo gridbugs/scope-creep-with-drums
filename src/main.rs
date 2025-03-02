@@ -8,7 +8,7 @@ use geom::*;
 use grid_2d::Coord;
 use procgen::{Map1, Map2};
 use rand::{Rng, SeedableRng, rngs::StdRng};
-use std::{cmp::Ordering, collections::VecDeque};
+use std::{cmp::Ordering, collections::VecDeque, mem};
 
 const DISPLAY_WIDTH: f32 = 960.;
 const DISPLAY_HEIGHT: f32 = 720.;
@@ -677,6 +677,7 @@ impl State {
                     });
                     let left = Vec2::new(left.x, -left.y);
                     let right = Vec2::new(right.x, -right.y);
+                    // the bottom lines are put in backwards to reduce noise
                     bottom_lines.push(RenderedWorldSeg {
                         projected_seg: Seg2::new(right, left),
                         mid_depth,
@@ -684,6 +685,14 @@ impl State {
                 }
             }
         }
+        // flip every second vertical line so there's less noise during rendering
+        for (i, seg) in vertical_lines.iter_mut().enumerate() {
+            if i % 2 == 0 {
+                mem::swap(&mut seg.projected_seg.start, &mut seg.projected_seg.end);
+            }
+        }
+        // reverse the lines along the bottom of the image to reduce rendering noise
+        bottom_lines.reverse();
         let mut world = Vec::new();
         world.extend(vertical_lines);
         world.extend(top_lines);
