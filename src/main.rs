@@ -91,9 +91,14 @@ fn sig(scene: FrameSig<FrameSigVar<RenderedScene>>) -> StereoPair<SigBoxed<f32>>
         let scene = scene.clone();
         move |i: usize| scene.map(move |scene| scene.objects.get(i).cloned())
     };
-    let num_visible_objects = {
+    let _num_visible_objects = {
         let scene = scene.clone();
         scene.map(move |scene| scene.objects.len()).shared()
+    };
+    let nth_object_exists_mul = |i| {
+        (get_nth_object.clone())(i)
+            .map(|o| if o.is_some() { 1. } else { 0. })
+            .shared()
     };
     Stereo::new_fn_channel(|channel| {
         let scene_tracer = SceneTracer {
@@ -113,16 +118,26 @@ fn sig(scene: FrameSig<FrameSigVar<RenderedScene>>) -> StereoPair<SigBoxed<f32>>
             sample_index: 0,
         })
         .shared();
-        let world_pulse = oscillator(Pulse, 60.)
-            .pulse_width_01(
-                num_visible_objects
-                    .clone()
-                    .map(|n| if n == 0 { 0. } else { 0.5 }),
-            )
-            .build()
-            .signed_to_01()
-            .shared();
-        let object0_pulse = (Sig(1.) - world_pulse.clone()).shared();
+        let object_renderer1 = Sig(ObjectRenderer {
+            object: (get_nth_object.clone())(1),
+            buf: Vec::new(),
+            sample_index: 0,
+        })
+        .shared();
+
+        let make_pulse = |i: usize| {
+            (oscillator(Pulse, 60.)
+                .pulse_width_01(0.1)
+                .reset_offset_01(-0.1 * i as f32)
+                .build()
+                .signed_to_01()
+                .inv_01()
+                * nth_object_exists_mul(i))
+            .shared()
+        };
+        let object0_pulse = make_pulse(0);
+        let object1_pulse = make_pulse(1);
+        let world_pulse = (Sig(1.) - object0_pulse.clone() - object1_pulse.clone()).shared();
         match channel {
             Channel::Left => {
                 let world = base
@@ -130,7 +145,8 @@ fn sig(scene: FrameSig<FrameSigVar<RenderedScene>>) -> StereoPair<SigBoxed<f32>>
                     .map(|(audio_sample, scene_sample)| scene_sample.x + audio_sample);
                 let world = world * world_pulse.clone();
                 let object0 = object_renderer0.clone().map(|v| v.x) * object0_pulse.clone();
-                ((world + object0) * post_scale).boxed()
+                let object1 = object_renderer1.clone().map(|v| v.x) * object1_pulse.clone();
+                ((world + object0 + object1) * post_scale).boxed()
             }
             Channel::Right => {
                 let world = base
@@ -138,7 +154,8 @@ fn sig(scene: FrameSig<FrameSigVar<RenderedScene>>) -> StereoPair<SigBoxed<f32>>
                     .map(|(audio_sample, scene_sample)| scene_sample.y + audio_sample);
                 let world = world * world_pulse.clone();
                 let object0 = object_renderer0.clone().map(|v| v.y) * object0_pulse.clone();
-                ((world + object0) * post_scale).boxed()
+                let object1 = object_renderer1.clone().map(|v| v.y) * object1_pulse.clone();
+                ((world + object0 + object1) * post_scale).boxed()
             }
         }
     })
@@ -406,10 +423,16 @@ impl State {
             position: Vec2::new(12., 12.),
             facing_rad: 180f32.to_radians(),
         };
-        let objects = vec![Object {
-            position: Vec2::new(5., 10.),
-            radius: 1.,
-        }];
+        let objects = vec![
+            Object {
+                position: Vec2::new(5., 10.),
+                radius: 1.,
+            },
+            Object {
+                position: Vec2::new(12., 12.),
+                radius: 1.,
+            },
+        ];
         Self {
             map1,
             map2,
