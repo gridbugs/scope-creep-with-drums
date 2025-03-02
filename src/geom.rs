@@ -1,6 +1,6 @@
 use bevy::math::Vec2;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Seg2 {
     pub start: Vec2,
     pub end: Vec2,

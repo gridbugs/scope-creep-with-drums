@@ -1,182 +1,144 @@
 use bevy::{
     input::mouse::MouseMotion,
     prelude::*,
-    window::{CursorGrabMode, PrimaryWindow, WindowResolution},
+    window::{CursorGrabMode, WindowResolution},
 };
 use caw::prelude::*;
-use caw_bevy::BevyInput;
 use geom::*;
 use grid_2d::Coord;
 use procgen::{Map1, Map2};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{cmp::Ordering, collections::VecDeque};
 
+const DISPLAY_WIDTH: f32 = 960.;
+const DISPLAY_HEIGHT: f32 = 720.;
+const TOP_LEFT_OFFSET: Vec2 = Vec2::new(-DISPLAY_WIDTH / 2., DISPLAY_HEIGHT / 2.);
 const MAX_NUM_SAMPLES: usize = 4_000;
 
 mod geom;
 mod procgen;
 
-#[derive(Clone, Copy, Debug)]
-struct Seg3 {
-    start: Vec3,
-    end: Vec3,
+#[derive(Clone)]
+struct SceneTracer {
+    scene: FrameSig<FrameSigVar<RenderedScene>>,
+    buf: Vec<Vec2>,
+    index: usize,
 }
 
-impl Seg3 {
-    fn new(start: Vec3, end: Vec3) -> Self {
-        Self { start, end }
-    }
-}
-
-fn cube_edges() -> Vec<Seg3> {
-    let square_corners_horizontal = |y| {
-        vec![
-            Vec3::new(1., y, 1.),
-            Vec3::new(1., y, -1.),
-            Vec3::new(-1., y, -1.),
-            Vec3::new(-1., y, 1.),
-        ]
-    };
-    let top = square_corners_horizontal(1.);
-    let btm = square_corners_horizontal(-1.);
-    vec![
-        // top face
-        Seg3::new(top[0], top[1]),
-        Seg3::new(top[1], top[2]),
-        Seg3::new(top[2], top[3]),
-        Seg3::new(top[3], top[0]),
-        // bottom face
-        Seg3::new(btm[0], btm[1]),
-        Seg3::new(btm[1], btm[2]),
-        Seg3::new(btm[2], btm[3]),
-        Seg3::new(btm[3], btm[0]),
-        // connections from top to bottom
-        Seg3::new(top[0], btm[0]),
-        Seg3::new(top[1], btm[1]),
-        Seg3::new(top[2], btm[2]),
-        Seg3::new(top[3], btm[3]),
-    ]
-}
-
-fn transform_vec3_to_render(in_: Vec3, rot_y: f32, rot_z: f32) -> Vec2 {
-    let transform = Mat4::from_rotation_x(rot_z);
-    let in_ = transform.transform_point3(in_);
-    let transform =
-        Mat4::from_rotation_translation(Quat::from_rotation_y(rot_y), Vec3::new(0., 0., 2.2));
-    let in_ = transform.transform_point3(in_);
-    //let in_ = in_ + Vec3::new(0., 0., 4.);
-    let perspective = Mat4::perspective_lh(std::f32::consts::FRAC_PI_4, 1., 0., 1.);
-    let out = perspective.project_point3(in_);
-    Vec2::new(out.x, out.y)
-}
-
-struct Cube<SY: FrameSigT<Item = f32>, SZ: FrameSigT<Item = f32>> {
-    geometry: Vec<Seg3>,
-    buf: Vec<Seg2>,
-    rot_y: f32,
-    rot_z: f32,
-    speed_y: SY,
-    speed_z: SZ,
-}
-
-impl<SY: FrameSigT<Item = f32>, SZ: FrameSigT<Item = f32>> Cube<SY, SZ> {
-    fn new(speed_y: SY, speed_z: SZ) -> Self {
-        Self {
-            geometry: cube_edges(),
-            buf: Vec::new(),
-            rot_y: 0.,
-            rot_z: 0.,
-            speed_y,
-            speed_z,
-        }
-    }
-}
-
-impl<SY: FrameSigT<Item = f32>, SZ: FrameSigT<Item = f32>> SigT for Cube<SY, SZ> {
-    type Item = Seg2;
+impl SigT for SceneTracer {
+    type Item = Vec2;
 
     fn sample(&mut self, ctx: &SigCtx) -> impl Buf<Self::Item> {
         self.buf.clear();
-        let num_segment_repeat = ctx.num_samples / self.geometry.len();
-        for i in 0..ctx.num_samples {
-            let edge3 = self.geometry[(i / num_segment_repeat) % self.geometry.len()];
-            let edge2 = Seg2::new(
-                transform_vec3_to_render(edge3.start, self.rot_y, self.rot_z),
-                transform_vec3_to_render(edge3.end, self.rot_y, self.rot_z),
-            );
-            self.buf.push(edge2);
+        let scene: RenderedScene = self.scene.frame_sample(ctx);
+        if scene.world.is_empty() {
+            self.buf.resize(ctx.num_samples, Vec2::ZERO);
+        } else {
+            while self.buf.len() < ctx.num_samples {
+                let mut start = true;
+                let rendered_world_seg = scene.world[self.index % scene.world.len()];
+                let brightness = 20. / rendered_world_seg.mid_depth;
+                let num_reps = (brightness as usize).clamp(1, 10) * 2;
+                for _ in 0..num_reps {
+                    let seg = rendered_world_seg.projected_seg;
+                    if start {
+                        self.buf.push(seg.start);
+                    } else {
+                        self.buf.push(seg.end);
+                    }
+                    start = !start;
+                }
+                self.index += 1;
+            }
         }
-        self.rot_y += 0.05; // (self.speed_y.frame_sample(ctx) - 0.5) * 0.5;
-        self.rot_z += 0.01; //(self.speed_z.frame_sample(ctx) - 0.5) * 0.5;
         &self.buf
     }
 }
 
-fn apply_effects(
-    sig: Sig<impl SigT<Item = f32>>,
-    mouse_x: Sig<impl SigT<Item = f32>>,
-    mouse_y: Sig<impl SigT<Item = f32>>,
-) -> Sig<impl SigT<Item = f32>> {
-    sig.filter(low_pass::default(20000. * mouse_y).resonance(mouse_x))
+#[derive(Clone)]
+struct ObjectRenderer<O: FrameSigT<Item = Option<RenderedObject>>> {
+    object: O,
+    buf: Vec<Vec2>,
+    sample_index: u64,
 }
 
-fn sig(
-    BevyInput {
-        mouse_x,
-        mouse_y,
-        keyboard,
-    }: BevyInput,
-) -> StereoPair<SigBoxed<f32>> {
-    let shape = Sig(Cube::new(mouse_x.clone(), mouse_y.clone())).shared();
+impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
+    type Item = Vec2;
+
+    fn sample(&mut self, ctx: &SigCtx) -> impl Buf<Self::Item> {
+        self.buf.clear();
+        if let Some(object) = self.object.frame_sample(ctx) {
+            let offset = Vec2::new(object.mid, 0.);
+            for _ in 0..ctx.num_samples {
+                let speed = 100.;
+                let dx = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).cos();
+                let dy = ((speed * 90.01 * self.sample_index as f32) / ctx.sample_rate_hz).sin();
+                let delta = Vec2::new(dx, dy);
+                self.sample_index += 1;
+                let mut v = offset + delta * object.height;
+                v.x = v.x.clamp(object.right, object.left);
+                self.buf.push(v);
+            }
+        } else {
+            self.buf.resize(ctx.num_samples, Vec2::ZERO);
+        }
+        &self.buf
+    }
+}
+
+fn sig(scene: FrameSig<FrameSigVar<RenderedScene>>) -> StereoPair<SigBoxed<f32>> {
+    let get_nth_object = {
+        let scene = scene.clone();
+        move |i: usize| scene.map(move |scene| scene.objects.get(i).cloned())
+    };
+    let num_visible_objects = {
+        let scene = scene.clone();
+        scene.map(move |scene| scene.objects.len()).shared()
+    };
     Stereo::new_fn_channel(|channel| {
-        let MonoVoice {
-            note,
-            key_down_gate,
-            key_press_trig,
-            ..
-        } = keyboard
-            .clone()
-            .opinionated_key_events(Note::B0)
-            .mono_voice();
-        let note = note.shared();
-        let env = adsr_linear_01(key_down_gate)
-            .key_press_trig(key_press_trig)
-            .attack_s(1.)
-            .release_s(4.)
+        let scene_tracer = SceneTracer {
+            scene: scene.clone(),
+            buf: Vec::new(),
+            index: 0,
+        };
+        let base_scale = 0.;
+        let post_scale = 0.001;
+        let base = oscillator(Sine, 30.)
+            .reset_offset_01(channel.circle_phase_offset_01())
             .build()
-            .exp_01(1.0)
+            * base_scale;
+        let object_renderer0 = Sig(ObjectRenderer {
+            object: (get_nth_object.clone())(0),
+            buf: Vec::new(),
+            sample_index: 0,
+        })
+        .shared();
+        let world_pulse = oscillator(Pulse, 60.)
+            .pulse_width_01(
+                num_visible_objects
+                    .clone()
+                    .map(|n| if n == 0 { 0. } else { 0.5 }),
+            )
+            .build()
+            .signed_to_01()
             .shared();
-        let sig = oscillator(Saw, note.clone().freq_hz() * 4.)
-            .build()
-            //.filter(chorus().num_voices(1).lfo_rate_hz(0.05).delay_s(0.01))
-            //.filter(low_pass::default(5000.).resonance(0.5))
-            .filter(compressor().threshold(1.).ratio(0.0).scale(2.))
-            .signed_to_01();
-        let scale = 0.1;
+        let object0_pulse = (Sig(1.) - world_pulse.clone()).shared();
         match channel {
             Channel::Left => {
-                let sig = sig.zip(shape.clone()).map(|(audio_sample, shape_sample)| {
-                    let delta = shape_sample.delta();
-                    (audio_sample * delta.x) + shape_sample.start.x
-                }) * scale;
-                let sig = apply_effects(
-                    sig,
-                    Sig(mouse_x.clone()),
-                    env.clone() * Sig(mouse_y.clone()),
-                );
-                sig.boxed()
+                let world = base
+                    .zip(scene_tracer.clone())
+                    .map(|(audio_sample, scene_sample)| scene_sample.x + audio_sample);
+                let world = world * world_pulse.clone();
+                let object0 = object_renderer0.clone().map(|v| v.x) * object0_pulse.clone();
+                ((world + object0) * post_scale).boxed()
             }
             Channel::Right => {
-                let sig = sig.zip(shape.clone()).map(|(audio_sample, shape_sample)| {
-                    let delta = shape_sample.delta();
-                    (audio_sample * delta.y) + shape_sample.start.y
-                }) * scale;
-                let sig = apply_effects(
-                    sig,
-                    Sig(mouse_x.clone()),
-                    env.clone() * Sig(mouse_y.clone()),
-                );
-                sig.boxed()
+                let world = base
+                    .zip(scene_tracer.clone())
+                    .map(|(audio_sample, scene_sample)| scene_sample.y + audio_sample);
+                let world = world * world_pulse.clone();
+                let object0 = object_renderer0.clone().map(|v| v.y) * object0_pulse.clone();
+                ((world + object0) * post_scale).boxed()
             }
         }
     })
@@ -184,21 +146,25 @@ fn sig(
 
 struct AudioState {
     player: PlayerOwned,
+    rendered_scene: FrameSig<FrameSigVar<RenderedScene>>,
 }
 
 impl AudioState {
-    fn new(input: BevyInput) -> Self {
+    fn new(rendered_scene: FrameSig<FrameSigVar<RenderedScene>>) -> Self {
         let player = Player::new()
             .unwrap()
             .into_owned_stereo(
-                sig(input),
+                sig(rendered_scene.clone()),
                 ConfigOwned {
                     system_latency_s: 0.0167,
                     visualization_data_policy: Some(VisualizationDataPolicy::All),
                 },
             )
             .unwrap();
-        Self { player }
+        Self {
+            player,
+            rendered_scene,
+        }
     }
 
     fn tick(&mut self, scope_state: &mut ScopeState) {
@@ -229,9 +195,8 @@ impl ScopeState {
 }
 
 fn setup_caw_player(world: &mut World) {
-    let input = BevyInput::default();
-    world.insert_non_send_resource(AudioState::new(input.clone()));
-    world.insert_resource(input);
+    let rendered_scene = frame_sig_var(RenderedScene::default());
+    world.insert_non_send_resource(AudioState::new(rendered_scene));
     world.insert_resource(ScopeState::new());
 }
 
@@ -239,7 +204,12 @@ fn setup(mut commands: Commands) {
     commands.spawn(Camera2d);
 }
 
-fn caw_tick(mut audio_state: NonSendMut<AudioState>, mut scope_state: ResMut<ScopeState>) {
+fn caw_tick(
+    state: Res<State>,
+    mut audio_state: NonSendMut<AudioState>,
+    mut scope_state: ResMut<ScopeState>,
+) {
+    audio_state.rendered_scene.0.set(state.render());
     audio_state.tick(&mut scope_state);
 }
 
@@ -400,6 +370,7 @@ struct ProjectedObject {
     screen_space_position: Vec2,
 }
 
+#[derive(Clone, Copy, Default, Debug)]
 struct RenderedObject {
     left: f32,
     right: f32,
@@ -407,8 +378,15 @@ struct RenderedObject {
     height: f32,
 }
 
+#[derive(Clone, Copy, Default, Debug)]
+struct RenderedWorldSeg {
+    projected_seg: Seg2,
+    mid_depth: f32,
+}
+
+#[derive(Clone, Default, Debug)]
 struct RenderedScene {
-    world: Vec<Seg2>,
+    world: Vec<RenderedWorldSeg>,
     objects: Vec<RenderedObject>,
 }
 
@@ -641,8 +619,14 @@ impl State {
         let mut vertical_lines = Vec::new();
         for projected_point in projected_points.iter() {
             let start = screen_space_project(projected_point.screen_space_coord);
-            let end = Vec2::new(start.x, -start.y);
-            vertical_lines.push(Seg2::new(start, end));
+            if start.x > -DISPLAY_WIDTH / 2. && start.x < DISPLAY_WIDTH / 2. {
+                //log::info!("{:?}", start);
+                let end = Vec2::new(start.x, -start.y);
+                vertical_lines.push(RenderedWorldSeg {
+                    projected_seg: Seg2::new(start, end),
+                    mid_depth: projected_point.screen_space_coord.y,
+                });
+            }
         }
         let mut top_lines = Vec::new();
         let mut bottom_lines = Vec::new();
@@ -650,12 +634,21 @@ impl State {
             let left_opt = w[0].right_screen_space_coord();
             let right_opt = w[1].left_screen_space_coord();
             if let Some((left, right)) = left_opt.zip(right_opt) {
+                let mid_depth = (left.y + right.y) / 2.;
                 let left = screen_space_project(left);
                 let right = screen_space_project(right);
-                top_lines.push(Seg2::new(left, right));
-                let left = Vec2::new(left.x, -left.y);
-                let right = Vec2::new(right.x, -right.y);
-                bottom_lines.push(Seg2::new(right, left));
+                if right.x > -DISPLAY_WIDTH / 2. && left.x < DISPLAY_WIDTH / 2. {
+                    top_lines.push(RenderedWorldSeg {
+                        projected_seg: Seg2::new(left, right),
+                        mid_depth,
+                    });
+                    let left = Vec2::new(left.x, -left.y);
+                    let right = Vec2::new(right.x, -right.y);
+                    bottom_lines.push(RenderedWorldSeg {
+                        projected_seg: Seg2::new(right, left),
+                        mid_depth,
+                    });
+                }
             }
         }
         let mut world = Vec::new();
@@ -667,12 +660,14 @@ impl State {
             let left = screen_space_project(object.screen_space_seg.start);
             let right = screen_space_project(object.screen_space_seg.end);
             let mid = screen_space_project(object.screen_space_position);
-            rendered_objects.push(RenderedObject {
-                left: left.x,
-                right: right.x,
-                mid: mid.x,
-                height: left.y,
-            });
+            if left.x > -DISPLAY_WIDTH / 2. && right.x < DISPLAY_WIDTH / 2. {
+                rendered_objects.push(RenderedObject {
+                    left: left.x,
+                    right: right.x,
+                    mid: mid.x,
+                    height: left.y,
+                });
+            }
         }
         RenderedScene {
             world,
@@ -690,11 +685,6 @@ fn setup_state(world: &mut World) {
 fn coord_to_vec(coord: Coord) -> Vec2 {
     Vec2::new(coord.x as f32, coord.y as f32)
 }
-
-const DISPLAY_WIDTH: f32 = 960.;
-const DISPLAY_HEIGHT: f32 = 720.;
-
-const TOP_LEFT_OFFSET: Vec2 = Vec2::new(-DISPLAY_WIDTH / 2., DISPLAY_HEIGHT / 2.);
 
 #[allow(unused)]
 fn debug_render_map1(state: Res<State>, mut gizmos: Gizmos) {
@@ -852,7 +842,11 @@ fn project_through_objects(
 #[allow(unused)]
 fn debug_render_map2_3d(state: Res<State>, mut gizmos: Gizmos) {
     let RenderedScene { world, objects } = state.render();
-    for Seg2 { start, end } in world {
+    for RenderedWorldSeg {
+        projected_seg: Seg2 { start, end },
+        ..
+    } in world
+    {
         gizmos.line_2d(start, end, Color::srgb(0., 1., 0.));
     }
     for RenderedObject {
@@ -880,6 +874,7 @@ fn debug_render_map2_3d(state: Res<State>, mut gizmos: Gizmos) {
     }
 }
 
+#[allow(unused)]
 fn debug_update(mut state: ResMut<State>, keys: Res<ButtonInput<KeyCode>>) {
     if keys.just_pressed(KeyCode::KeyR) {
         state.reset();
@@ -889,6 +884,16 @@ fn debug_update(mut state: ResMut<State>, keys: Res<ButtonInput<KeyCode>>) {
     }
     if keys.pressed(KeyCode::KeyE) {
         state.player.rotate(-1.);
+    }
+}
+
+fn input_update(
+    mut state: ResMut<State>,
+    mut evr_motion: EventReader<MouseMotion>,
+    keys: Res<ButtonInput<KeyCode>>,
+) {
+    for ev in evr_motion.read() {
+        state.player.rotate(-ev.delta.x);
     }
     if keys.pressed(KeyCode::KeyW) {
         state.player.walk(Vec2::new(0., 1.));
@@ -901,12 +906,6 @@ fn debug_update(mut state: ResMut<State>, keys: Res<ButtonInput<KeyCode>>) {
     }
     if keys.pressed(KeyCode::KeyD) {
         state.player.walk(Vec2::new(1., 0.));
-    }
-}
-
-fn input_update(mut state: ResMut<State>, mut evr_motion: EventReader<MouseMotion>) {
-    for ev in evr_motion.read() {
-        state.player.rotate(-ev.delta.x);
     }
 }
 
@@ -940,18 +939,19 @@ fn main() {
         }))
         .add_systems(Startup, (setup_caw_player, setup, setup_state))
         .insert_resource(ClearColor(Color::srgb(0., 0., 0.)))
-        //.add_systems(FixedFirst, caw_tick)
-        //.add_systems(Update, BevyInput::update)
+        .add_systems(FixedFirst, caw_tick)
         .add_systems(
             Update,
             (
-                debug_render_map1,
-                debug_render_map2,
-                debug_render_map2_pruned,
-                debug_render_map2_3d,
-                debug_update,
+                //debug_render_map1,
+                //debug_render_map2,
+                //debug_render_map2_pruned,
+                //debug_render_map2_3d,
+                //debug_update,
                 grab_mouse,
                 input_update,
+                //caw_tick,
+                render_scope,
             ),
         )
         .run();
