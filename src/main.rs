@@ -100,6 +100,7 @@ fn sig(scene: FrameSig<FrameSigVar<RenderedScene>>) -> StereoPair<SigBoxed<f32>>
             .map(|o| if o.is_some() { 1. } else { 0. })
             .shared()
     };
+    let max_num_objects = 10;
     Stereo::new_fn_channel(|channel| {
         let scene_tracer = SceneTracer {
             scene: scene.clone(),
@@ -112,50 +113,59 @@ fn sig(scene: FrameSig<FrameSigVar<RenderedScene>>) -> StereoPair<SigBoxed<f32>>
             .reset_offset_01(channel.circle_phase_offset_01())
             .build()
             * base_scale;
-        let object_renderer0 = Sig(ObjectRenderer {
-            object: (get_nth_object.clone())(0),
-            buf: Vec::new(),
-            sample_index: 0,
-        })
-        .shared();
-        let object_renderer1 = Sig(ObjectRenderer {
-            object: (get_nth_object.clone())(1),
-            buf: Vec::new(),
-            sample_index: 0,
-        })
-        .shared();
+        let object_renderers = (0..max_num_objects)
+            .map(|i| {
+                Sig(ObjectRenderer {
+                    object: (get_nth_object.clone())(i),
+                    buf: Vec::new(),
+                    sample_index: 0,
+                })
+                .shared()
+            })
+            .collect::<Vec<_>>();
 
         let make_pulse = |i: usize| {
+            let obj_pulse_width = 0.1;
             (oscillator(Pulse, 60.)
-                .pulse_width_01(0.1)
-                .reset_offset_01(-0.1 * i as f32)
+                .pulse_width_01(obj_pulse_width)
+                .reset_offset_01(-obj_pulse_width * i as f32)
                 .build()
                 .signed_to_01()
                 .inv_01()
                 * nth_object_exists_mul(i))
             .shared()
         };
-        let object0_pulse = make_pulse(0);
-        let object1_pulse = make_pulse(1);
-        let world_pulse = (Sig(1.) - object0_pulse.clone() - object1_pulse.clone()).shared();
+        let object_pulses = (0..max_num_objects).map(make_pulse).collect::<Vec<_>>();
+        let object_pulse_sum = object_pulses.iter().cloned().sum::<Sig<_>>();
+        let world_pulse = (Sig(1.) - object_pulse_sum).shared();
         match channel {
             Channel::Left => {
                 let world = base
                     .zip(scene_tracer.clone())
                     .map(|(audio_sample, scene_sample)| scene_sample.x + audio_sample);
                 let world = world * world_pulse.clone();
-                let object0 = object_renderer0.clone().map(|v| v.x) * object0_pulse.clone();
-                let object1 = object_renderer1.clone().map(|v| v.x) * object1_pulse.clone();
-                ((world + object0 + object1) * post_scale).boxed()
+                let objects = object_renderers
+                    .into_iter()
+                    .zip(object_pulses)
+                    .map(|(object_renderer, object_pulse)| {
+                        object_renderer.clone().map(|v| v.x) * object_pulse.clone()
+                    })
+                    .sum::<Sig<_>>();
+                ((world + objects) * post_scale).boxed()
             }
             Channel::Right => {
                 let world = base
                     .zip(scene_tracer.clone())
                     .map(|(audio_sample, scene_sample)| scene_sample.y + audio_sample);
                 let world = world * world_pulse.clone();
-                let object0 = object_renderer0.clone().map(|v| v.y) * object0_pulse.clone();
-                let object1 = object_renderer1.clone().map(|v| v.y) * object1_pulse.clone();
-                ((world + object0 + object1) * post_scale).boxed()
+                let objects = object_renderers
+                    .into_iter()
+                    .zip(object_pulses)
+                    .map(|(object_renderer, object_pulse)| {
+                        object_renderer.clone().map(|v| v.y) * object_pulse.clone()
+                    })
+                    .sum::<Sig<_>>();
+                ((world + objects) * post_scale).boxed()
             }
         }
     })
