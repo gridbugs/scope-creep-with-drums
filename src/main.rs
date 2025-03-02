@@ -1,4 +1,8 @@
-use bevy::{math::VectorSpace, prelude::*, window::WindowResolution};
+use bevy::{
+    input::mouse::MouseMotion,
+    prelude::*,
+    window::{CursorGrabMode, PrimaryWindow, WindowResolution},
+};
 use caw::prelude::*;
 use caw_bevy::BevyInput;
 use geom::*;
@@ -261,6 +265,7 @@ fn render_scope(scope_state: Res<ScopeState>, window: Query<&Window>, mut gizmos
     }
 }
 
+#[derive(Debug)]
 struct PlayerCharacter {
     position: Vec2,
     facing_rad: f32,
@@ -270,11 +275,11 @@ impl PlayerCharacter {
     // The unit of [by] is an angle such that 1. is a reasonable amount for a single button press.
     // Positive values rotate to the right (clockwise looking down).
     fn rotate(&mut self, by: f32) {
-        self.facing_rad += by * 0.01;
+        self.facing_rad += by * 0.005;
     }
     fn walk(&mut self, by: Vec2) {
         // Use right90 here so that (0, 1) represents forward, (1, 0) represents right, etc.
-        let delta = self.right90().rotate(by) * 0.1;
+        let delta = self.right90().rotate(by) * 0.05;
         self.position += delta;
     }
     fn facing_vec2_normalized(&self) -> Vec2 {
@@ -310,6 +315,7 @@ impl PlayerCharacter {
     }
 }
 
+#[derive(Debug)]
 struct ConnectedPoint {
     point: Vec2,
     neighbours: Vec<Vec2>,
@@ -332,8 +338,8 @@ impl ConnectedPoint {
                 .enumerate()
                 .map(|(i, &point)| {
                     let neighbours = vec![
-                        linestrip[if i == 0 { linestrip.len() - 1 } else { i - 1 }],
-                        linestrip[if i == linestrip.len() - 1 { 0 } else { i + 1 }],
+                        linestrip[if i == 0 { linestrip.len() - 2 } else { i - 1 }],
+                        linestrip[if i == linestrip.len() - 1 { 1 } else { i + 1 }],
                     ];
                     Self { point, neighbours }
                 })
@@ -361,11 +367,20 @@ impl ConnectedPoint {
     // Operates in screen space where the eye is at the origin and is looking in the (0, 1)
     // direction.
     fn classify_screen_space(&self) -> ConnectedPointClassification {
+        let eps = 0.0001;
         let this_ratio = self.point.x / self.point.y;
-        if self.neighbours.iter().all(|n| (n.x / n.y) < this_ratio) {
-            ConnectedPointClassification::ContinueLeft
-        } else if self.neighbours.iter().all(|n| (n.x / n.y) > this_ratio) {
+        if self
+            .neighbours
+            .iter()
+            .all(|n| (n.x / n.y) <= this_ratio + eps)
+        {
             ConnectedPointClassification::ContinueRight
+        } else if self
+            .neighbours
+            .iter()
+            .all(|n| (n.x / n.y) >= this_ratio - eps)
+        {
+            ConnectedPointClassification::ContinueLeft
         } else {
             ConnectedPointClassification::Stop
         }
@@ -384,8 +399,8 @@ impl State {
         let map1 = Map1::new();
         let map2 = Map2::new();
         let player = PlayerCharacter {
-            position: Vec2::new(15., 10.),
-            facing_rad: 0f32.to_radians(),
+            position: Vec2::new(10., 15.),
+            facing_rad: -90f32.to_radians(),
         };
         Self { map1, map2, player }
     }
@@ -401,10 +416,11 @@ impl State {
 
     fn prune_geometry(&self) -> Vec<Vec<Vec2>> {
         let mut pruned_walls = Vec::new();
+        let clipping_plane_offset = Vec2::new(0., 0.1);
         for wall_strip in &self.map2.wall_strips {
             let wall_strip_rel = wall_strip
                 .iter()
-                .map(|v| self.player.transform_abs_vec2_to_rel(v))
+                .map(|v| self.player.transform_abs_vec2_to_rel(v) - clipping_plane_offset)
                 .collect::<Vec<_>>();
             let _ = wall_strip; // prevent us from accidentally referring to the wrong wall strip later
             let mut runs = vec![Vec::new()];
@@ -437,6 +453,11 @@ impl State {
                 runs.pop();
             }
             pruned_walls.extend(runs);
+        }
+        for linestrip in &mut pruned_walls {
+            for v in linestrip {
+                *v += clipping_plane_offset;
+            }
         }
         pruned_walls
     }
@@ -534,6 +555,8 @@ enum VertexProjectionCeiling {
     BothTop,
     LeftWall(Vec2),
     RightWall(Vec2),
+    LeftNone,
+    RightNone,
 }
 
 #[derive(Debug)]
@@ -543,26 +566,29 @@ struct VertexProjection {
 }
 
 impl VertexProjection {
-    fn left_screen_space_coord(&self) -> Vec2 {
+    fn left_screen_space_coord(&self) -> Option<Vec2> {
         match self.ceiling {
-            VertexProjectionCeiling::BothTop | VertexProjectionCeiling::RightWall(_) => {
-                self.screen_space_coord
-            }
-            VertexProjectionCeiling::LeftWall(left) => left,
+            VertexProjectionCeiling::BothTop
+            | VertexProjectionCeiling::RightWall(_)
+            | VertexProjectionCeiling::RightNone => Some(self.screen_space_coord),
+            VertexProjectionCeiling::LeftWall(left) => Some(left),
+            VertexProjectionCeiling::LeftNone => None,
         }
     }
-    fn right_screen_space_coord(&self) -> Vec2 {
+    fn right_screen_space_coord(&self) -> Option<Vec2> {
         match self.ceiling {
-            VertexProjectionCeiling::BothTop | VertexProjectionCeiling::LeftWall(_) => {
-                self.screen_space_coord
-            }
-            VertexProjectionCeiling::RightWall(right) => right,
+            VertexProjectionCeiling::BothTop
+            | VertexProjectionCeiling::LeftWall(_)
+            | VertexProjectionCeiling::LeftNone => Some(self.screen_space_coord),
+            VertexProjectionCeiling::RightWall(right) => Some(right),
+            VertexProjectionCeiling::RightNone => None,
         }
     }
 }
 
 #[allow(unused)]
 fn debug_render_map2_3d(state: Res<State>, mut gizmos: Gizmos) {
+    let eps = 0.0001;
     let pruned_walls = state.prune_geometry();
     let all_walls = pruned_walls
         .iter()
@@ -583,7 +609,14 @@ fn debug_render_map2_3d(state: Res<State>, mut gizmos: Gizmos) {
                     // is part of.
                     !(wall.start == cp.point || wall.end == cp.point)
                 })
-                .any(|wall| ray_from_eye.intersect(wall).is_some())
+                .any(|wall| {
+                    if ray_from_eye.intersect(&wall.grow(eps)).is_some() {
+                        //log::info!("excluding {:?}", cp.point);
+                        true
+                    } else {
+                        false
+                    }
+                })
         })
         .collect::<Vec<_>>();
     let project_to_wall = |v: Vec2| {
@@ -598,7 +631,7 @@ fn debug_render_map2_3d(state: Res<State>, mut gizmos: Gizmos) {
                 // is part of.
                 !(wall.start == v || wall.end == v)
             })
-            .filter_map(|w| w.intersect(&ray_from_eye))
+            .filter_map(|wall| ray_from_eye.intersect(&wall.grow(eps)))
             .min_by(|a, b| {
                 if a.length() < b.length() {
                     Ordering::Less
@@ -608,19 +641,21 @@ fn debug_render_map2_3d(state: Res<State>, mut gizmos: Gizmos) {
                     Ordering::Equal
                 }
             })
-            .unwrap_or(distant_point)
     };
+
     let mut projected_points = visible_connected_points
         .iter()
         .map(|cp| {
             let ceiling = match cp.classify_screen_space() {
                 ConnectedPointClassification::Stop => VertexProjectionCeiling::BothTop,
-                ConnectedPointClassification::ContinueLeft => {
-                    VertexProjectionCeiling::LeftWall(project_to_wall(cp.point))
-                }
-                ConnectedPointClassification::ContinueRight => {
-                    VertexProjectionCeiling::RightWall(project_to_wall(cp.point))
-                }
+                ConnectedPointClassification::ContinueLeft => match project_to_wall(cp.point) {
+                    Some(p) => VertexProjectionCeiling::LeftWall(p),
+                    None => VertexProjectionCeiling::LeftNone,
+                },
+                ConnectedPointClassification::ContinueRight => match project_to_wall(cp.point) {
+                    Some(p) => VertexProjectionCeiling::RightWall(p),
+                    None => VertexProjectionCeiling::RightNone,
+                },
             };
             VertexProjection {
                 screen_space_coord: cp.point,
@@ -640,8 +675,10 @@ fn debug_render_map2_3d(state: Res<State>, mut gizmos: Gizmos) {
         }
     });
 
+    //log::info!("visible connected points: {:?}", visible_connected_points);
+    //log::info!("projected points: {:?}", projected_points);
     let scale_y = 200.;
-    let scale_x = 300.;
+    let scale_x = 400.;
     let screen_space_project = |v: Vec2| {
         let x = scale_x * v.x / v.y;
         let y = scale_y / v.y;
@@ -653,12 +690,16 @@ fn debug_render_map2_3d(state: Res<State>, mut gizmos: Gizmos) {
         gizmos.line_2d(start, end, Color::srgb(0., 1., 0.));
     }
     for w in projected_points.windows(2) {
-        let left = screen_space_project(w[0].left_screen_space_coord());
-        let right = screen_space_project(w[1].right_screen_space_coord());
-        gizmos.line_2d(left, right, Color::srgb(0., 1., 0.));
-        let left = Vec2::new(left.x, -left.y);
-        let right = Vec2::new(right.x, -right.y);
-        gizmos.line_2d(left, right, Color::srgb(0., 1., 0.));
+        let left_opt = w[0].right_screen_space_coord();
+        let right_opt = w[1].left_screen_space_coord();
+        if let Some((left, right)) = left_opt.zip(right_opt) {
+            let left = screen_space_project(left);
+            let right = screen_space_project(right);
+            gizmos.line_2d(left, right, Color::srgb(0., 1., 0.));
+            let left = Vec2::new(left.x, -left.y);
+            let right = Vec2::new(right.x, -right.y);
+            gizmos.line_2d(left, right, Color::srgb(0., 1., 0.));
+        }
     }
 
     let wall_length = 5.;
@@ -693,6 +734,29 @@ fn debug_update(mut state: ResMut<State>, keys: Res<ButtonInput<KeyCode>>) {
     }
 }
 
+fn input_update(mut state: ResMut<State>, mut evr_motion: EventReader<MouseMotion>) {
+    for ev in evr_motion.read() {
+        state.player.rotate(-ev.delta.x);
+    }
+}
+
+// This system grabs the mouse when the left mouse button is pressed
+// and releases it when the escape key is pressed
+fn grab_mouse(
+    mut window: Single<&mut Window>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    key: Res<ButtonInput<KeyCode>>,
+) {
+    if mouse.just_pressed(MouseButton::Left) {
+        window.cursor_options.visible = false;
+        window.cursor_options.grab_mode = CursorGrabMode::Locked;
+    }
+    if key.just_pressed(KeyCode::Escape) {
+        window.cursor_options.visible = true;
+        window.cursor_options.grab_mode = CursorGrabMode::None;
+    }
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -716,6 +780,8 @@ fn main() {
                 debug_render_map2_pruned,
                 debug_render_map2_3d,
                 debug_update,
+                grab_mouse,
+                input_update,
             ),
         )
         .run();

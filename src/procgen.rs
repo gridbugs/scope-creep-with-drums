@@ -242,9 +242,16 @@ impl Map1 {
         /*
         let wall_strips = vec![vec![
             Vec2::new(0., 0.),
-            Vec2::new(20., 0.),
-            Vec2::new(20., 20.),
-            Vec2::new(0., 20.),
+            Vec2::new(10., 0.),
+            Vec2::new(10., 10.),
+            Vec2::new(20., 10.),
+        ]];*/
+        /*
+        let wall_strips = vec![vec![
+            Vec2::new(0., 0.),
+            Vec2::new(10., 0.),
+            Vec2::new(10., 10.),
+            Vec2::new(0., 10.),
             Vec2::new(0., 0.),
         ]];*/
         Map2 { wall_strips }

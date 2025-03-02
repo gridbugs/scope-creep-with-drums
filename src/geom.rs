@@ -15,6 +15,13 @@ impl Seg2 {
         Self { start, end }
     }
 
+    pub fn map<F: FnMut(Vec2) -> Vec2>(&self, mut f: F) -> Self {
+        Self {
+            start: f(self.start),
+            end: f(self.end),
+        }
+    }
+
     pub fn delta(&self) -> Vec2 {
         self.end - self.start
     }
@@ -26,6 +33,14 @@ impl Seg2 {
         let delta = self.delta();
         let mult = -self.start.y / delta.y;
         Some(self.start + (delta * mult))
+    }
+
+    pub fn grow(&self, by: f32) -> Self {
+        let step = self.delta().normalize() * by;
+        Self {
+            start: self.start - step,
+            end: self.end + step,
+        }
     }
 
     pub fn intersect(&self, other: &Self) -> Option<Vec2> {
