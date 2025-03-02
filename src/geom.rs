@@ -15,13 +15,6 @@ impl Seg2 {
         Self { start, end }
     }
 
-    pub fn map<F: FnMut(Vec2) -> Vec2>(&self, mut f: F) -> Self {
-        Self {
-            start: f(self.start),
-            end: f(self.end),
-        }
-    }
-
     pub fn delta(&self) -> Vec2 {
         self.end - self.start
     }

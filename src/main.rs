@@ -387,11 +387,37 @@ impl ConnectedPoint {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Object {
+    position: Vec2,
+    radius: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ProjectedObject {
+    occluded: bool,
+    screen_space_seg: Seg2,
+    screen_space_position: Vec2,
+}
+
+struct RenderedObject {
+    left: f32,
+    right: f32,
+    mid: f32,
+    height: f32,
+}
+
+struct RenderedScene {
+    world: Vec<Seg2>,
+    objects: Vec<RenderedObject>,
+}
+
 #[derive(Resource)]
 struct State {
     map1: Map1,
     map2: Map2,
     player: PlayerCharacter,
+    objects: Vec<Object>,
 }
 
 impl State {
@@ -399,10 +425,19 @@ impl State {
         let map1 = Map1::new();
         let map2 = Map2::new();
         let player = PlayerCharacter {
-            position: Vec2::new(10., 15.),
-            facing_rad: -90f32.to_radians(),
+            position: Vec2::new(12., 12.),
+            facing_rad: 180f32.to_radians(),
         };
-        Self { map1, map2, player }
+        let objects = vec![Object {
+            position: Vec2::new(5., 10.),
+            radius: 1.,
+        }];
+        Self {
+            map1,
+            map2,
+            player,
+            objects,
+        }
     }
 
     fn reset(&mut self) {
@@ -461,6 +496,189 @@ impl State {
         }
         pruned_walls
     }
+
+    fn render(&self) -> RenderedScene {
+        let eps = 0.0001;
+        let pruned_walls = self.prune_geometry();
+        let all_walls = pruned_walls
+            .iter()
+            .flat_map(|linestrip| seg2s_from_linestrip(linestrip))
+            .collect::<Vec<_>>();
+        let connected_points = pruned_walls
+            .iter()
+            .flat_map(|linestrip| ConnectedPoint::vec_from_linestrip(linestrip))
+            .collect::<Vec<_>>();
+        let visible_connected_points = connected_points
+            .iter()
+            .filter(|cp| {
+                let ray_from_eye = Seg2::new(Vec2::ZERO, cp.point);
+                !all_walls
+                    .iter()
+                    .filter(|wall| {
+                        // Prevent the ray from being tested for intersections with the walls that its vertex
+                        // is part of.
+                        !(wall.start == cp.point || wall.end == cp.point)
+                    })
+                    .any(|wall| {
+                        if ray_from_eye.intersect(&wall.grow(eps)).is_some() {
+                            //log::info!("excluding {:?}", cp.point);
+                            true
+                        } else {
+                            false
+                        }
+                    })
+            })
+            .collect::<Vec<_>>();
+        let project_to_wall = |v: Vec2| {
+            let v_norm = v.normalize();
+            let max_depth_test_dist = 1000.;
+            let distant_point = v_norm * max_depth_test_dist;
+            let ray_from_eye = Seg2::new(Vec2::ZERO, distant_point);
+            all_walls
+                .iter()
+                .filter(|wall| {
+                    // Prevent the ray from being tested for intersections with the walls that its vertex
+                    // is part of.
+                    !(wall.start == v || wall.end == v)
+                })
+                .filter_map(|wall| ray_from_eye.intersect(&wall.grow(eps)))
+                .min_by(|a, b| {
+                    if a.length() < b.length() {
+                        Ordering::Less
+                    } else if a.length() > b.length() {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Equal
+                    }
+                })
+        };
+        let mut objects = self
+            .objects
+            .iter()
+            .filter_map(|o| {
+                let to_edge = self.player.right90() * o.radius;
+                let screen_space_position = self.player.transform_abs_vec2_to_rel(o.position);
+                let screen_space_seg = Seg2 {
+                    start: self.player.transform_abs_vec2_to_rel(o.position + to_edge),
+                    end: self.player.transform_abs_vec2_to_rel(o.position - to_edge),
+                };
+                if screen_space_seg.start.y < 0. || screen_space_seg.end.y < 0. {
+                    return None;
+                }
+                Some(ProjectedObject {
+                    screen_space_seg,
+                    occluded: false,
+                    screen_space_position,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut projected_points = visible_connected_points
+            .iter()
+            .map(|cp| {
+                let ceiling = match cp.classify_screen_space() {
+                    ConnectedPointClassification::Stop => VertexProjectionCeiling::BothTop,
+                    ConnectedPointClassification::ContinueLeft => {
+                        let wall_point = project_to_wall(cp.point);
+                        project_through_objects(cp.point, wall_point, Side::Left, &mut objects);
+                        match wall_point {
+                            Some(p) => VertexProjectionCeiling::LeftWall(p),
+                            None => VertexProjectionCeiling::LeftNone,
+                        }
+                    }
+                    ConnectedPointClassification::ContinueRight => {
+                        let wall_point = project_to_wall(cp.point);
+                        project_through_objects(cp.point, wall_point, Side::Right, &mut objects);
+                        match wall_point {
+                            Some(p) => VertexProjectionCeiling::RightWall(p),
+                            None => VertexProjectionCeiling::RightNone,
+                        }
+                    }
+                };
+                VertexProjection {
+                    screen_space_coord: cp.point,
+                    ceiling,
+                }
+            })
+            .collect::<Vec<_>>();
+        projected_points.sort_by(|a, b| {
+            let ratio_a = a.screen_space_coord.x / a.screen_space_coord.y;
+            let ratio_b = b.screen_space_coord.x / b.screen_space_coord.y;
+            if ratio_a < ratio_b {
+                Ordering::Less
+            } else if ratio_a > ratio_b {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        });
+        let objects = objects
+            .into_iter()
+            .filter(|o| {
+                // The occluded flag is only set if there is a ray from the eye to some part of the
+                // object.
+                if o.occluded {
+                    return true;
+                }
+                // At this point the object is either entirely visible or entirely occluded. Testing
+                // the visibility of a single point on the object is sufficient to test whether the
+                // entire object is visible.
+                let v = Seg2::new(Vec2::ZERO, o.screen_space_seg.start);
+                for wall in &all_walls {
+                    if v.intersect(&wall.grow(eps)).is_some() {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect::<Vec<_>>();
+        let scale_y = 200.;
+        let scale_x = 400.;
+        let screen_space_project = |v: Vec2| {
+            let x = scale_x * v.x / v.y;
+            let y = scale_y / v.y;
+            Vec2 { x, y }
+        };
+        let mut vertical_lines = Vec::new();
+        for projected_point in projected_points.iter() {
+            let start = screen_space_project(projected_point.screen_space_coord);
+            let end = Vec2::new(start.x, -start.y);
+            vertical_lines.push(Seg2::new(start, end));
+        }
+        let mut top_lines = Vec::new();
+        let mut bottom_lines = Vec::new();
+        for w in projected_points.windows(2) {
+            let left_opt = w[0].right_screen_space_coord();
+            let right_opt = w[1].left_screen_space_coord();
+            if let Some((left, right)) = left_opt.zip(right_opt) {
+                let left = screen_space_project(left);
+                let right = screen_space_project(right);
+                top_lines.push(Seg2::new(left, right));
+                let left = Vec2::new(left.x, -left.y);
+                let right = Vec2::new(right.x, -right.y);
+                bottom_lines.push(Seg2::new(right, left));
+            }
+        }
+        let mut world = Vec::new();
+        world.extend(vertical_lines);
+        world.extend(top_lines);
+        world.extend(bottom_lines);
+        let mut rendered_objects = Vec::new();
+        for object in objects {
+            let left = screen_space_project(object.screen_space_seg.start);
+            let right = screen_space_project(object.screen_space_seg.end);
+            let mid = screen_space_project(object.screen_space_position);
+            rendered_objects.push(RenderedObject {
+                left: left.x,
+                right: right.x,
+                mid: mid.x,
+                height: left.y,
+            });
+        }
+        RenderedScene {
+            world,
+            objects: rendered_objects,
+        }
+    }
 }
 
 fn setup_state(world: &mut World) {
@@ -499,6 +717,13 @@ fn debug_render_map1(state: Res<State>, mut gizmos: Gizmos) {
             .map(|v| cell_size * v + offset),
         Color::srgb(1., 0., 0.),
     );
+    for object in &state.objects {
+        gizmos.circle_2d(
+            object.position * cell_size.x + offset,
+            object.radius,
+            Color::srgb(0., 1., 1.),
+        );
+    }
 }
 
 #[allow(unused)]
@@ -586,127 +811,72 @@ impl VertexProjection {
     }
 }
 
+enum Side {
+    Left,
+    Right,
+}
+
+fn project_through_objects(
+    v: Vec2,
+    wall_point: Option<Vec2>,
+    side: Side,
+    objects: &mut Vec<ProjectedObject>,
+) {
+    let eps = 0.0001;
+    let v_norm = v.normalize();
+    let max_depth_test_dist = 1000.;
+    let distant_point = v_norm * max_depth_test_dist;
+    let ray_from_eye = Seg2::new(Vec2::ZERO, distant_point);
+    for o in objects {
+        if let Some(ict) = ray_from_eye.intersect(&o.screen_space_seg.grow(eps)) {
+            if let Some(wall_point) = wall_point {
+                if wall_point.y < ict.y {
+                    // If the nearest wall to the eye along this ray is closer than the
+                    // intersection point with the object then don't consider the intersection
+                    // point with the object.
+                    continue;
+                }
+            }
+            // only occlude objects behind the wall
+            if ict.y >= v.y {
+                o.occluded = true;
+                match side {
+                    Side::Left => o.screen_space_seg.start = ict,
+                    Side::Right => o.screen_space_seg.end = ict,
+                }
+            }
+        }
+    }
+}
+
 #[allow(unused)]
 fn debug_render_map2_3d(state: Res<State>, mut gizmos: Gizmos) {
-    let eps = 0.0001;
-    let pruned_walls = state.prune_geometry();
-    let all_walls = pruned_walls
-        .iter()
-        .flat_map(|linestrip| seg2s_from_linestrip(linestrip))
-        .collect::<Vec<_>>();
-    let connected_points = pruned_walls
-        .iter()
-        .flat_map(|linestrip| ConnectedPoint::vec_from_linestrip(linestrip))
-        .collect::<Vec<_>>();
-    let visible_connected_points = connected_points
-        .iter()
-        .filter(|cp| {
-            let ray_from_eye = Seg2::new(Vec2::ZERO, cp.point);
-            !all_walls
-                .iter()
-                .filter(|wall| {
-                    // Prevent the ray from being tested for intersections with the walls that its vertex
-                    // is part of.
-                    !(wall.start == cp.point || wall.end == cp.point)
-                })
-                .any(|wall| {
-                    if ray_from_eye.intersect(&wall.grow(eps)).is_some() {
-                        //log::info!("excluding {:?}", cp.point);
-                        true
-                    } else {
-                        false
-                    }
-                })
-        })
-        .collect::<Vec<_>>();
-    let project_to_wall = |v: Vec2| {
-        let v_norm = v.normalize();
-        let max_depth_test_dist = 1000.;
-        let distant_point = v_norm * max_depth_test_dist;
-        let ray_from_eye = Seg2::new(Vec2::ZERO, distant_point);
-        all_walls
-            .iter()
-            .filter(|wall| {
-                // Prevent the ray from being tested for intersections with the walls that its vertex
-                // is part of.
-                !(wall.start == v || wall.end == v)
-            })
-            .filter_map(|wall| ray_from_eye.intersect(&wall.grow(eps)))
-            .min_by(|a, b| {
-                if a.length() < b.length() {
-                    Ordering::Less
-                } else if a.length() > b.length() {
-                    Ordering::Greater
-                } else {
-                    Ordering::Equal
-                }
-            })
-    };
-
-    let mut projected_points = visible_connected_points
-        .iter()
-        .map(|cp| {
-            let ceiling = match cp.classify_screen_space() {
-                ConnectedPointClassification::Stop => VertexProjectionCeiling::BothTop,
-                ConnectedPointClassification::ContinueLeft => match project_to_wall(cp.point) {
-                    Some(p) => VertexProjectionCeiling::LeftWall(p),
-                    None => VertexProjectionCeiling::LeftNone,
-                },
-                ConnectedPointClassification::ContinueRight => match project_to_wall(cp.point) {
-                    Some(p) => VertexProjectionCeiling::RightWall(p),
-                    None => VertexProjectionCeiling::RightNone,
-                },
-            };
-            VertexProjection {
-                screen_space_coord: cp.point,
-                ceiling,
-            }
-        })
-        .collect::<Vec<_>>();
-    projected_points.sort_by(|a, b| {
-        let ratio_a = a.screen_space_coord.x / a.screen_space_coord.y;
-        let ratio_b = b.screen_space_coord.x / b.screen_space_coord.y;
-        if ratio_a < ratio_b {
-            Ordering::Less
-        } else if ratio_a > ratio_b {
-            Ordering::Greater
-        } else {
-            Ordering::Equal
-        }
-    });
-
-    //log::info!("visible connected points: {:?}", visible_connected_points);
-    //log::info!("projected points: {:?}", projected_points);
-    let scale_y = 200.;
-    let scale_x = 400.;
-    let screen_space_project = |v: Vec2| {
-        let x = scale_x * v.x / v.y;
-        let y = scale_y / v.y;
-        Vec2 { x, y }
-    };
-    for projected_point in projected_points.iter() {
-        let start = screen_space_project(projected_point.screen_space_coord);
-        let end = Vec2::new(start.x, -start.y);
+    let RenderedScene { world, objects } = state.render();
+    for Seg2 { start, end } in world {
         gizmos.line_2d(start, end, Color::srgb(0., 1., 0.));
     }
-    for w in projected_points.windows(2) {
-        let left_opt = w[0].right_screen_space_coord();
-        let right_opt = w[1].left_screen_space_coord();
-        if let Some((left, right)) = left_opt.zip(right_opt) {
-            let left = screen_space_project(left);
-            let right = screen_space_project(right);
-            gizmos.line_2d(left, right, Color::srgb(0., 1., 0.));
-            let left = Vec2::new(left.x, -left.y);
-            let right = Vec2::new(right.x, -right.y);
-            gizmos.line_2d(left, right, Color::srgb(0., 1., 0.));
-        }
-    }
-
-    let wall_length = 5.;
-    let offset = TOP_LEFT_OFFSET + Vec2::new(640., -140.);
-    let transform = |v| v * wall_length + offset;
-    for cp in visible_connected_points {
-        gizmos.circle_2d(transform(cp.point), 2., Color::srgb(1., 1., 0.));
+    for RenderedObject {
+        left,
+        right,
+        mid,
+        height,
+    } in objects
+    {
+        gizmos.line_2d(
+            Vec2::new(left, height),
+            Vec2::new(left, -height),
+            Color::srgb(0., 1., 1.),
+        );
+        gizmos.line_2d(
+            Vec2::new(right, height),
+            Vec2::new(right, -height),
+            Color::srgb(0., 1., 1.),
+        );
+        gizmos.line_2d(
+            Vec2::new(mid, height),
+            Vec2::new(mid, -height),
+            Color::srgb(0., 1., 1.),
+        );
     }
 }
 
