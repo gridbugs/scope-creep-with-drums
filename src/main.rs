@@ -14,6 +14,7 @@ const DISPLAY_WIDTH: f32 = 960.;
 const DISPLAY_HEIGHT: f32 = 720.;
 const TOP_LEFT_OFFSET: Vec2 = Vec2::new(-DISPLAY_WIDTH / 2., DISPLAY_HEIGHT / 2.);
 const MAX_NUM_SAMPLES: usize = 4_000;
+const SCALE: f32 = 10.;
 
 mod geom;
 mod procgen;
@@ -100,7 +101,7 @@ fn sig(scene: FrameSig<FrameSigVar<RenderedScene>>) -> StereoPair<SigBoxed<f32>>
             .map(|o| if o.is_some() { 1. } else { 0. })
             .shared()
     };
-    let max_num_objects = 10;
+    let max_num_objects = 9;
     Stereo::new_fn_channel(|channel| {
         let scene_tracer = SceneTracer {
             scene: scene.clone(),
@@ -151,7 +152,9 @@ fn sig(scene: FrameSig<FrameSigVar<RenderedScene>>) -> StereoPair<SigBoxed<f32>>
                         object_renderer.clone().map(|v| v.x) * object_pulse.clone()
                     })
                     .sum::<Sig<_>>();
-                ((world + objects) * post_scale).clamp_symetric(0.5).boxed()
+                ((world + objects) * post_scale / SCALE)
+                    .clamp_symetric(0.5)
+                    .boxed()
             }
             Channel::Right => {
                 let world = base
@@ -165,7 +168,9 @@ fn sig(scene: FrameSig<FrameSigVar<RenderedScene>>) -> StereoPair<SigBoxed<f32>>
                         object_renderer.clone().map(|v| v.y) * object_pulse.clone()
                     })
                     .sum::<Sig<_>>();
-                ((world + objects) * post_scale).clamp_symetric(0.5).boxed()
+                ((world + objects) * post_scale / SCALE)
+                    .clamp_symetric(0.5)
+                    .boxed()
             }
         }
     })
@@ -244,7 +249,7 @@ fn render_scope(scope_state: Res<ScopeState>, window: Query<&Window>, mut gizmos
     let color = Vec3::new(0., 1., 0.);
     let mut current_color = Vec3::ZERO;
     let color_step = color / scope_state.samples.len() as f32;
-    let scale = window.single().width();
+    let scale = window.single().width() * SCALE;
     let mut samples_iter = scope_state.samples.iter().map(|sample| sample * scale);
     let mut prev = if let Some(first) = samples_iter.next() {
         first
