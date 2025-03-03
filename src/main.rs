@@ -80,7 +80,7 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> ObjectRenderer<O> {
         }
     }
 
-    fn sample_enemy1(&mut self, object: &RenderedObject, ctx: &SigCtx) {
+    fn sample_ghost(&mut self, object: &RenderedObject, ctx: &SigCtx) {
         let offset = Vec2::new(object.mid, object.height * -0.2);
         for i in 0..ctx.num_samples {
             let random_01 = self.rng.random::<f32>();
@@ -97,6 +97,55 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> ObjectRenderer<O> {
             self.buf.push(v);
         }
     }
+
+    fn sample_slug(&mut self, object: &RenderedObject, ctx: &SigCtx) {
+        let offset = Vec2::new(object.mid, object.height * -1.);
+        for i in 0..ctx.num_samples {
+            let delta = match (i / 8) % 3 {
+                1 => {
+                    let random_x = self.rng.random::<f32>() * 0.9;
+                    let random_y = self.rng.random::<f32>() * 0.5;
+                    let speed = 100.;
+                    let dx = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).cos()
+                        * random_x;
+                    let mut dy = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz)
+                        .sin()
+                        * random_y;
+                    dy = dy.abs();
+                    Vec2::new(dx, dy)
+                }
+                0 => {
+                    let random_x = self.rng.random::<f32>() * 2. - 1.;
+                    let random_y = self.rng.random::<f32>() * 2. - 1.;
+                    let speed = 100.;
+                    let dx = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).cos()
+                        * 0.2
+                        + random_x * 0.05;
+                    let dy = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).sin()
+                        * 0.2
+                        + random_y * 0.05;
+                    Vec2::new(dx, dy) + Vec2::new(0.5, 0.8)
+                }
+                2 => {
+                    let random_x = self.rng.random::<f32>() * 2. - 1.;
+                    let random_y = self.rng.random::<f32>() * 2. - 1.;
+                    let speed = 100.;
+                    let dx = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).cos()
+                        * 0.2
+                        + random_x * 0.05;
+                    let dy = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).sin()
+                        * 0.2
+                        + random_y * 0.05;
+                    Vec2::new(dx, dy) + Vec2::new(-0.5, 0.8)
+                }
+                _ => unreachable!(),
+            };
+            self.sample_index += 1;
+            let mut v = offset + delta * object.height;
+            v.x = v.x.clamp(object.right, object.left);
+            self.buf.push(v);
+        }
+    }
 }
 
 impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
@@ -107,7 +156,8 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
         if let Some(object) = self.object.frame_sample(ctx) {
             match object.typ {
                 ObjectType::Test => self.sample_test(&object, ctx),
-                ObjectType::Ghost => self.sample_enemy1(&object, ctx),
+                ObjectType::Ghost => self.sample_ghost(&object, ctx),
+                ObjectType::Slug => self.sample_slug(&object, ctx),
             }
         } else {
             self.buf.resize(ctx.num_samples, Vec2::ZERO);
@@ -195,7 +245,7 @@ fn sig(
             .attack_s(0.1)
             .release_s(match channel {
                 Channel::Left => 2.0,
-                Channel::Right => 1.0,
+                Channel::Right => 1.5,
             })
             .build()
             .exp_01(-1.)
@@ -450,6 +500,7 @@ impl ConnectedPoint {
 enum ObjectType {
     Test,
     Ghost,
+    Slug,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -494,6 +545,7 @@ struct State {
     map2: Map2,
     player: PlayerCharacter,
     objects: Vec<Object>,
+    paused: bool,
 }
 
 fn all_walls(map: &Map2) -> impl Iterator<Item = Seg2> {
@@ -539,6 +591,11 @@ impl State {
                 radius: 0.5,
             },
             Object {
+                typ: ObjectType::Slug,
+                position: Vec2::new(5., 10.),
+                radius: 0.5,
+            },
+            Object {
                 typ: ObjectType::Ghost,
                 position: Vec2::new(5., 10.),
                 radius: 0.5,
@@ -549,6 +606,7 @@ impl State {
             map2,
             player,
             objects,
+            paused: false,
         }
     }
 
@@ -581,9 +639,14 @@ impl State {
                     if let Some(walk_delta) = (self.player.position - o.position).try_normalize() {
                         let walk_delta = walk_delta * 0.01;
                         o.position += walk_delta;
-                        //o.position = move_object_with_wall_collision_detection(
-                        //    o.position, walk_delta, &self.map2,
-                        //);
+                    }
+                }
+                ObjectType::Slug => {
+                    if let Some(walk_delta) = (self.player.position - o.position).try_normalize() {
+                        let walk_delta = walk_delta * 0.02;
+                        o.position = move_object_with_wall_collision_detection(
+                            o.position, walk_delta, &self.map2,
+                        );
                     }
                 }
                 ObjectType::Test => (),
@@ -1081,11 +1144,8 @@ fn debug_update(mut state: ResMut<State>, keys: Res<ButtonInput<KeyCode>>) {
     if keys.just_pressed(KeyCode::KeyR) {
         state.reset();
     }
-    if keys.pressed(KeyCode::KeyQ) {
-        state.player.rotate(1.);
-    }
-    if keys.pressed(KeyCode::KeyE) {
-        state.player.rotate(-1.);
+    if keys.pressed(KeyCode::KeyP) {
+        state.paused = !state.paused;
     }
 }
 
@@ -1134,14 +1194,16 @@ fn grab_mouse(
 }
 
 fn enemy_update(mut state: ResMut<State>) {
-    state.enemies_walk();
+    if !state.paused {
+        state.enemies_walk();
+    }
 }
 
 fn passives_update(mut state: ResMut<State>) {
     let mut player_alive = state.player.alive;
     for o in &state.objects {
         match o.typ {
-            ObjectType::Ghost => {
+            ObjectType::Ghost | ObjectType::Slug => {
                 if o.position.distance(state.player.position) < OBJECT_RADIUS * 2. {
                     player_alive = false;
                 }
@@ -1165,20 +1227,19 @@ fn main() {
         }))
         .add_systems(Startup, (setup_caw_player, setup, setup_state))
         .insert_resource(ClearColor(Color::srgb(0., 0., 0.)))
-        .add_systems(FixedFirst, caw_tick)
         .add_systems(
-            Update,
+            FixedUpdate,
             (
                 //debug_render_map1,
                 //debug_render_map2,
                 //debug_render_map2_pruned,
                 //debug_render_map2_3d,
-                //debug_update,
+                debug_update,
+                caw_tick,
                 grab_mouse,
                 input_update,
                 enemy_update,
                 passives_update,
-                //caw_tick,
                 render_scope,
             ),
         )
