@@ -4,6 +4,7 @@ use bevy::{
     window::{CursorGrabMode, WindowResolution},
 };
 use caw::prelude::*;
+use core::f32;
 use geom::{Circle, *};
 use grid_2d::Coord;
 use procgen::{Map1, Map2};
@@ -91,7 +92,9 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> ObjectRenderer<O> {
                 1 => rect(-0.25, -1.25, 0.5, 0.5),
                 _ => unreachable!(),
             };
-            self.buf.push(v * object.height + offset);
+            let mut v = v * object.height + offset;
+            v.x = v.x.clamp(object.right, object.left);
+            self.buf.push(v);
         }
     }
 }
@@ -104,7 +107,7 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
         if let Some(object) = self.object.frame_sample(ctx) {
             match object.typ {
                 ObjectType::Test => self.sample_test(&object, ctx),
-                ObjectType::Enemy1 => self.sample_enemy1(&object, ctx),
+                ObjectType::Ghost => self.sample_enemy1(&object, ctx),
             }
         } else {
             self.buf.resize(ctx.num_samples, Vec2::ZERO);
@@ -113,7 +116,10 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
     }
 }
 
-fn sig(scene: FrameSig<FrameSigVar<RenderedScene>>) -> StereoPair<SigBoxed<f32>> {
+fn sig(
+    scene: FrameSig<FrameSigVar<RenderedScene>>,
+    dist_to_nearest_ghost: FrameSig<FrameSigVar<f32>>,
+) -> StereoPair<SigBoxed<f32>> {
     let get_nth_object = {
         let scene = scene.clone();
         move |i: usize| scene.map(move |scene| scene.objects.get(i).cloned())
@@ -181,7 +187,11 @@ fn sig(scene: FrameSig<FrameSigVar<RenderedScene>>) -> StereoPair<SigBoxed<f32>>
                 object_renderer.clone().map(dim_of_channel) * object_pulse.clone()
             })
             .sum::<Sig<_>>();
-        ((world + objects) * post_scale / SCALE)
+        let ghost_noise_level = dist_to_nearest_ghost.clone().map(|d| {
+            let min = 8.;
+            if d > min { 0. } else { 0.03 * (min - d) / min }
+        });
+        (((world + objects) * post_scale + noise::brown() * ghost_noise_level) / SCALE)
             .clamp_symetric(0.5)
             .boxed()
     })
@@ -190,14 +200,18 @@ fn sig(scene: FrameSig<FrameSigVar<RenderedScene>>) -> StereoPair<SigBoxed<f32>>
 struct AudioState {
     player: PlayerOwned,
     rendered_scene: FrameSig<FrameSigVar<RenderedScene>>,
+    dist_to_nearest_ghost: FrameSig<FrameSigVar<f32>>,
 }
 
 impl AudioState {
-    fn new(rendered_scene: FrameSig<FrameSigVar<RenderedScene>>) -> Self {
+    fn new(
+        rendered_scene: FrameSig<FrameSigVar<RenderedScene>>,
+        dist_to_nearest_ghost: FrameSig<FrameSigVar<f32>>,
+    ) -> Self {
         let player = Player::new()
             .unwrap()
             .into_owned_stereo(
-                sig(rendered_scene.clone()),
+                sig(rendered_scene.clone(), dist_to_nearest_ghost.clone()),
                 ConfigOwned {
                     system_latency_s: 0.0167,
                     visualization_data_policy: Some(VisualizationDataPolicy::All),
@@ -207,6 +221,7 @@ impl AudioState {
         Self {
             player,
             rendered_scene,
+            dist_to_nearest_ghost,
         }
     }
 
@@ -239,7 +254,8 @@ impl ScopeState {
 
 fn setup_caw_player(world: &mut World) {
     let rendered_scene = frame_sig_var(RenderedScene::default());
-    world.insert_non_send_resource(AudioState::new(rendered_scene));
+    let dist_to_nearest_ghost = frame_sig_var(f32::INFINITY);
+    world.insert_non_send_resource(AudioState::new(rendered_scene, dist_to_nearest_ghost));
     world.insert_resource(ScopeState::new());
 }
 
@@ -253,6 +269,10 @@ fn caw_tick(
     mut scope_state: ResMut<ScopeState>,
 ) {
     audio_state.rendered_scene.0.set(state.render());
+    audio_state
+        .dist_to_nearest_ghost
+        .0
+        .set(state.distance_from_player_to_nearest_ghost());
     audio_state.tick(&mut scope_state);
 }
 
@@ -398,7 +418,7 @@ impl ConnectedPoint {
 #[derive(Clone, Copy, Debug)]
 enum ObjectType {
     Test,
-    Enemy1,
+    Ghost,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -445,6 +465,32 @@ struct State {
     objects: Vec<Object>,
 }
 
+fn all_walls(map: &Map2) -> impl Iterator<Item = Seg2> {
+    map.wall_strips
+        .iter()
+        .flat_map(|wall_strip| wall_strip.windows(2).map(|w| Seg2::new(w[0], w[1])))
+}
+
+fn move_object_with_wall_collision_detection(mut position: Vec2, delta: Vec2, map: &Map2) -> Vec2 {
+    let radius = 0.25;
+    let num_steps = 10;
+    let mut step = delta / num_steps as f32;
+    'outer: for _ in 0..num_steps {
+        let test_position = position + step;
+        for w in all_walls(map) {
+            if w.overlaps_with_circle(&Circle {
+                centre: test_position,
+                radius,
+            }) {
+                step = step.project_onto(w.delta());
+                continue 'outer;
+            }
+        }
+        position = test_position;
+    }
+    position
+}
+
 impl State {
     fn new() -> Self {
         let map1 = Map1::new();
@@ -460,7 +506,7 @@ impl State {
                 radius: 0.5,
             },
             Object {
-                typ: ObjectType::Enemy1,
+                typ: ObjectType::Ghost,
                 position: Vec2::new(12., 12.),
                 radius: 0.5,
             },
@@ -496,6 +542,36 @@ impl State {
         self.player.position = position;
     }
 
+    fn enemies_walk(&mut self) {
+        for o in &mut self.objects {
+            match o.typ {
+                ObjectType::Ghost => {
+                    if let Some(walk_delta) = (self.player.position - o.position).try_normalize() {
+                        let walk_delta = walk_delta * 0.01;
+                        o.position += walk_delta;
+                        //o.position = move_object_with_wall_collision_detection(
+                        //    o.position, walk_delta, &self.map2,
+                        //);
+                    }
+                }
+                ObjectType::Test => (),
+            }
+        }
+    }
+
+    fn distance_from_player_to_nearest_ghost(&self) -> f32 {
+        let mut min_dist = f32::INFINITY;
+        for o in &self.objects {
+            if let ObjectType::Ghost = o.typ {
+                let dist = o.position.distance(self.player.position);
+                if dist < min_dist {
+                    min_dist = dist;
+                }
+            }
+        }
+        min_dist
+    }
+
     fn reset(&mut self) {
         let mut seed_rng = StdRng::seed_from_u64(1);
         let seed = seed_rng.random();
@@ -506,10 +582,7 @@ impl State {
     }
 
     fn all_walls(&self) -> impl Iterator<Item = Seg2> {
-        self.map2
-            .wall_strips
-            .iter()
-            .flat_map(|wall_strip| wall_strip.windows(2).map(|w| Seg2::new(w[0], w[1])))
+        all_walls(&self.map2)
     }
 
     fn prune_geometry(&self) -> Vec<Vec<Vec2>> {
@@ -1028,6 +1101,10 @@ fn grab_mouse(
     }
 }
 
+fn enemy_update(mut state: ResMut<State>) {
+    state.enemies_walk();
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -1052,6 +1129,7 @@ fn main() {
                 //debug_update,
                 grab_mouse,
                 input_update,
+                enemy_update,
                 //caw_tick,
                 render_scope,
             ),
