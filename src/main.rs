@@ -14,7 +14,7 @@ const DISPLAY_WIDTH: f32 = 960.;
 const DISPLAY_HEIGHT: f32 = 720.;
 const TOP_LEFT_OFFSET: Vec2 = Vec2::new(-DISPLAY_WIDTH / 2., DISPLAY_HEIGHT / 2.);
 const MAX_NUM_SAMPLES: usize = 4_000;
-const SCALE: f32 = 10.;
+const SCALE: f32 = 40.;
 
 mod geom;
 mod procgen;
@@ -139,40 +139,24 @@ fn sig(scene: FrameSig<FrameSigVar<RenderedScene>>) -> StereoPair<SigBoxed<f32>>
         let object_pulses = (0..max_num_objects).map(make_pulse).collect::<Vec<_>>();
         let object_pulse_sum = object_pulses.iter().cloned().sum::<Sig<_>>();
         let world_pulse = (Sig(1.) - object_pulse_sum).shared();
-        match channel {
-            Channel::Left => {
-                let world = base
-                    .zip(scene_tracer.clone())
-                    .map(|(audio_sample, scene_sample)| scene_sample.x + audio_sample);
-                let world = world * world_pulse.clone();
-                let objects = object_renderers
-                    .into_iter()
-                    .zip(object_pulses)
-                    .map(|(object_renderer, object_pulse)| {
-                        object_renderer.clone().map(|v| v.x) * object_pulse.clone()
-                    })
-                    .sum::<Sig<_>>();
-                ((world + objects) * post_scale / SCALE)
-                    .clamp_symetric(0.5)
-                    .boxed()
-            }
-            Channel::Right => {
-                let world = base
-                    .zip(scene_tracer.clone())
-                    .map(|(audio_sample, scene_sample)| scene_sample.y + audio_sample);
-                let world = world * world_pulse.clone();
-                let objects = object_renderers
-                    .into_iter()
-                    .zip(object_pulses)
-                    .map(|(object_renderer, object_pulse)| {
-                        object_renderer.clone().map(|v| v.y) * object_pulse.clone()
-                    })
-                    .sum::<Sig<_>>();
-                ((world + objects) * post_scale / SCALE)
-                    .clamp_symetric(0.5)
-                    .boxed()
-            }
-        }
+        let dim_of_channel = move |v: Vec2| match channel {
+            Channel::Left => v.x,
+            Channel::Right => v.y,
+        };
+        let world = base
+            .zip(scene_tracer.clone())
+            .map(move |(audio_sample, scene_sample)| dim_of_channel(scene_sample) + audio_sample);
+        let world = world * world_pulse.clone();
+        let objects = object_renderers
+            .into_iter()
+            .zip(object_pulses)
+            .map(|(object_renderer, object_pulse)| {
+                object_renderer.clone().map(dim_of_channel) * object_pulse.clone()
+            })
+            .sum::<Sig<_>>();
+        ((world + objects) * post_scale / SCALE)
+            .clamp_symetric(0.5)
+            .boxed()
     })
 }
 
@@ -942,16 +926,16 @@ fn input_update(
     for ev in evr_motion.read() {
         state.player.rotate(-ev.delta.x);
     }
-    if keys.pressed(KeyCode::KeyW) {
+    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
         state.player.walk(Vec2::new(0., 1.));
     }
-    if keys.pressed(KeyCode::KeyS) {
+    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
         state.player.walk(Vec2::new(0., -1.));
     }
-    if keys.pressed(KeyCode::KeyA) {
+    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
         state.player.walk(Vec2::new(-1., 0.));
     }
-    if keys.pressed(KeyCode::KeyD) {
+    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
         state.player.walk(Vec2::new(1., 0.));
     }
 }
