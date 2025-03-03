@@ -119,6 +119,7 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
 fn sig(
     scene: FrameSig<FrameSigVar<RenderedScene>>,
     dist_to_nearest_ghost: FrameSig<FrameSigVar<f32>>,
+    player_alive: FrameSig<FrameSigVar<bool>>,
 ) -> StereoPair<SigBoxed<f32>> {
     let get_nth_object = {
         let scene = scene.clone();
@@ -157,7 +158,6 @@ fn sig(
                 .shared()
             })
             .collect::<Vec<_>>();
-
         let make_pulse = |i: usize| {
             let obj_pulse_width = 0.1;
             (oscillator(Pulse, 60.)
@@ -191,8 +191,25 @@ fn sig(
             let min = 8.;
             if d > min { 0. } else { 0.03 * (min - d) / min }
         });
-        (((world + objects) * post_scale + noise::brown() * ghost_noise_level) / SCALE)
-            .clamp_symetric(0.5)
+        let death_amp_env = (adsr_linear_01(player_alive.clone())
+            .attack_s(0.1)
+            .release_s(match channel {
+                Channel::Left => 2.0,
+                Channel::Right => 1.0,
+            })
+            .build()
+            .exp_01(-1.)
+            + 0.0001)
+            .map(|x| x.min(1.));
+        let death_noise_env = adsr_linear_01(player_alive.clone().map(|b| !b))
+            .attack_s(2.)
+            .build();
+        (((((world + objects) * post_scale)
+            + (noise::brown() * ghost_noise_level)
+            + (noise::brown() * death_noise_env))
+            .clamp_symetric(10.)
+            / SCALE)
+            * death_amp_env)
             .boxed()
     })
 }
@@ -201,17 +218,23 @@ struct AudioState {
     player: PlayerOwned,
     rendered_scene: FrameSig<FrameSigVar<RenderedScene>>,
     dist_to_nearest_ghost: FrameSig<FrameSigVar<f32>>,
+    player_alive: FrameSig<FrameSigVar<bool>>,
 }
 
 impl AudioState {
     fn new(
         rendered_scene: FrameSig<FrameSigVar<RenderedScene>>,
         dist_to_nearest_ghost: FrameSig<FrameSigVar<f32>>,
+        player_alive: FrameSig<FrameSigVar<bool>>,
     ) -> Self {
         let player = Player::new()
             .unwrap()
             .into_owned_stereo(
-                sig(rendered_scene.clone(), dist_to_nearest_ghost.clone()),
+                sig(
+                    rendered_scene.clone(),
+                    dist_to_nearest_ghost.clone(),
+                    player_alive.clone(),
+                ),
                 ConfigOwned {
                     system_latency_s: 0.0167,
                     visualization_data_policy: Some(VisualizationDataPolicy::All),
@@ -222,6 +245,7 @@ impl AudioState {
             player,
             rendered_scene,
             dist_to_nearest_ghost,
+            player_alive,
         }
     }
 
@@ -255,7 +279,12 @@ impl ScopeState {
 fn setup_caw_player(world: &mut World) {
     let rendered_scene = frame_sig_var(RenderedScene::default());
     let dist_to_nearest_ghost = frame_sig_var(f32::INFINITY);
-    world.insert_non_send_resource(AudioState::new(rendered_scene, dist_to_nearest_ghost));
+    let player_alive = frame_sig_var(true);
+    world.insert_non_send_resource(AudioState::new(
+        rendered_scene,
+        dist_to_nearest_ghost,
+        player_alive,
+    ));
     world.insert_resource(ScopeState::new());
 }
 
@@ -273,6 +302,7 @@ fn caw_tick(
         .dist_to_nearest_ghost
         .0
         .set(state.distance_from_player_to_nearest_ghost());
+    audio_state.player_alive.0.set(state.player.alive);
     audio_state.tick(&mut scope_state);
 }
 
@@ -302,6 +332,7 @@ fn render_scope(scope_state: Res<ScopeState>, window: Query<&Window>, mut gizmos
 struct PlayerCharacter {
     position: Vec2,
     facing_rad: f32,
+    alive: bool,
 }
 
 impl PlayerCharacter {
@@ -471,8 +502,9 @@ fn all_walls(map: &Map2) -> impl Iterator<Item = Seg2> {
         .flat_map(|wall_strip| wall_strip.windows(2).map(|w| Seg2::new(w[0], w[1])))
 }
 
+const OBJECT_RADIUS: f32 = 0.25;
+
 fn move_object_with_wall_collision_detection(mut position: Vec2, delta: Vec2, map: &Map2) -> Vec2 {
-    let radius = 0.25;
     let num_steps = 10;
     let mut step = delta / num_steps as f32;
     'outer: for _ in 0..num_steps {
@@ -480,7 +512,7 @@ fn move_object_with_wall_collision_detection(mut position: Vec2, delta: Vec2, ma
         for w in all_walls(map) {
             if w.overlaps_with_circle(&Circle {
                 centre: test_position,
-                radius,
+                radius: OBJECT_RADIUS,
             }) {
                 step = step.project_onto(w.delta());
                 continue 'outer;
@@ -498,6 +530,7 @@ impl State {
         let player = PlayerCharacter {
             position: Vec2::new(12., 12.),
             facing_rad: 180f32.to_radians(),
+            alive: true,
         };
         let objects = vec![
             Object {
@@ -507,7 +540,7 @@ impl State {
             },
             Object {
                 typ: ObjectType::Ghost,
-                position: Vec2::new(12., 12.),
+                position: Vec2::new(5., 10.),
                 radius: 0.5,
             },
         ];
@@ -522,7 +555,6 @@ impl State {
     fn player_walk(&mut self, by: Vec2) {
         // Use right90 here so that (0, 1) represents forward, (1, 0) represents right, etc.
         let delta = self.player.right90().rotate(by) * 0.05;
-        let radius = 0.25;
         let num_steps = 10;
         let mut position = self.player.position;
         let mut step = delta / num_steps as f32;
@@ -531,7 +563,7 @@ impl State {
             for w in self.all_walls() {
                 if w.overlaps_with_circle(&Circle {
                     centre: test_position,
-                    radius,
+                    radius: OBJECT_RADIUS,
                 }) {
                     step = step.project_onto(w.delta());
                     continue 'outer;
@@ -1105,6 +1137,21 @@ fn enemy_update(mut state: ResMut<State>) {
     state.enemies_walk();
 }
 
+fn passives_update(mut state: ResMut<State>) {
+    let mut player_alive = state.player.alive;
+    for o in &state.objects {
+        match o.typ {
+            ObjectType::Ghost => {
+                if o.position.distance(state.player.position) < OBJECT_RADIUS * 2. {
+                    player_alive = false;
+                }
+            }
+            ObjectType::Test => (),
+        }
+    }
+    state.player.alive = player_alive;
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -1130,6 +1177,7 @@ fn main() {
                 grab_mouse,
                 input_update,
                 enemy_update,
+                passives_update,
                 //caw_tick,
                 render_scope,
             ),
