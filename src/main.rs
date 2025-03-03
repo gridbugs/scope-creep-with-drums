@@ -4,7 +4,7 @@ use bevy::{
     window::{CursorGrabMode, WindowResolution},
 };
 use caw::prelude::*;
-use geom::*;
+use geom::{Circle, *};
 use grid_2d::Coord;
 use procgen::{Map1, Map2};
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -263,11 +263,6 @@ impl PlayerCharacter {
     fn rotate(&mut self, by: f32) {
         self.facing_rad += by * 0.005;
     }
-    fn walk(&mut self, by: Vec2) {
-        // Use right90 here so that (0, 1) represents forward, (1, 0) represents right, etc.
-        let delta = self.right90().rotate(by) * 0.05;
-        self.position += delta;
-    }
     fn facing_vec2_normalized(&self) -> Vec2 {
         let x = self.facing_rad.cos();
         let y = self.facing_rad.sin();
@@ -440,6 +435,29 @@ impl State {
         }
     }
 
+    fn player_walk(&mut self, by: Vec2) {
+        // Use right90 here so that (0, 1) represents forward, (1, 0) represents right, etc.
+        let delta = self.player.right90().rotate(by) * 0.05;
+        let radius = 0.25;
+        let num_steps = 10;
+        let mut position = self.player.position;
+        let mut step = delta / num_steps as f32;
+        'outer: for _ in 0..num_steps {
+            let test_position = position + step;
+            for w in self.all_walls() {
+                if w.overlaps_with_circle(&Circle {
+                    centre: test_position,
+                    radius,
+                }) {
+                    step = step.project_onto(w.delta());
+                    continue 'outer;
+                }
+            }
+            position = test_position;
+        }
+        self.player.position = position;
+    }
+
     fn reset(&mut self) {
         let mut seed_rng = StdRng::seed_from_u64(1);
         let seed = seed_rng.random();
@@ -447,6 +465,13 @@ impl State {
         let mut rng = StdRng::from_seed(seed);
         self.map1.generate(&mut rng);
         self.map2 = self.map1.to_map2();
+    }
+
+    fn all_walls(&self) -> impl Iterator<Item = Seg2> {
+        self.map2
+            .wall_strips
+            .iter()
+            .flat_map(|wall_strip| wall_strip.windows(2).map(|w| Seg2::new(w[0], w[1])))
     }
 
     fn prune_geometry(&self) -> Vec<Vec<Vec2>> {
@@ -926,18 +951,23 @@ fn input_update(
     for ev in evr_motion.read() {
         state.player.rotate(-ev.delta.x);
     }
+    let mut delta = Vec2::ZERO;
     if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
-        state.player.walk(Vec2::new(0., 1.));
+        delta += Vec2::new(0., 1.);
     }
     if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
-        state.player.walk(Vec2::new(0., -1.));
+        delta += Vec2::new(0., -1.);
     }
     if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
-        state.player.walk(Vec2::new(-1., 0.));
+        delta += Vec2::new(-1., 0.);
     }
     if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
-        state.player.walk(Vec2::new(1., 0.));
+        delta += Vec2::new(1., 0.);
     }
+    if delta != Vec2::ZERO {
+        delta = delta.normalize();
+    }
+    state.player_walk(delta);
 }
 
 // This system grabs the mouse when the left mouse button is pressed

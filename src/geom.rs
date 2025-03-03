@@ -1,6 +1,18 @@
 use bevy::math::Vec2;
 
 #[derive(Clone, Copy, Debug, Default)]
+pub struct Circle {
+    pub centre: Vec2,
+    pub radius: f32,
+}
+
+impl Circle {
+    pub fn contains(&self, v: Vec2) -> bool {
+        v.distance(self.centre) < self.radius
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Seg2 {
     pub start: Vec2,
     pub end: Vec2,
@@ -61,5 +73,28 @@ impl Seg2 {
             // Line segments are non-parallel but do not intersect
             None
         }
+    }
+
+    pub fn overlaps_with_circle(&self, circle: &Circle) -> bool {
+        if circle.contains(self.start) || circle.contains(self.end) {
+            return true;
+        }
+        let to_edge = self.delta().normalize() * circle.radius;
+        let perp = Vec2 {
+            x: to_edge.y,
+            y: -to_edge.x,
+        };
+        Self {
+            start: circle.centre,
+            end: circle.centre + perp,
+        }
+        .intersect(self)
+        .is_some()
+            || Self {
+                start: circle.centre,
+                end: circle.centre - perp,
+            }
+            .intersect(self)
+            .is_some()
     }
 }
