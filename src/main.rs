@@ -61,6 +61,39 @@ struct ObjectRenderer<O: FrameSigT<Item = Option<RenderedObject>>> {
     object: O,
     buf: Vec<Vec2>,
     sample_index: u64,
+    rng: StdRng,
+}
+
+impl<O: FrameSigT<Item = Option<RenderedObject>>> ObjectRenderer<O> {
+    fn sample_test(&mut self, object: &RenderedObject, ctx: &SigCtx) {
+        let offset = Vec2::new(object.mid, 0.);
+        for _ in 0..ctx.num_samples {
+            let speed = 100.;
+            let dx = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).cos();
+            let dy = ((speed * 90.01 * self.sample_index as f32) / ctx.sample_rate_hz).sin();
+            let delta = Vec2::new(dx, dy);
+            self.sample_index += 1;
+            let mut v = offset + delta * object.height;
+            v.x = v.x.clamp(object.right, object.left);
+            self.buf.push(v);
+        }
+    }
+
+    fn sample_enemy1(&mut self, object: &RenderedObject, ctx: &SigCtx) {
+        let offset = Vec2::new(object.mid, object.height * -0.2);
+        for i in 0..ctx.num_samples {
+            let random_01 = self.rng.random::<f32>();
+            let rect = move |l: f32, t: f32, w: f32, h: f32| {
+                Vec2::new(l, -t) + Vec2::new(w, h) * random_01
+            };
+            let v = match (i / 4) % 2 {
+                0 => rect(-0.5, 1., 1., 2.),
+                1 => rect(-0.25, -1.25, 0.5, 0.5),
+                _ => unreachable!(),
+            };
+            self.buf.push(v * object.height + offset);
+        }
+    }
 }
 
 impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
@@ -69,16 +102,9 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
     fn sample(&mut self, ctx: &SigCtx) -> impl Buf<Self::Item> {
         self.buf.clear();
         if let Some(object) = self.object.frame_sample(ctx) {
-            let offset = Vec2::new(object.mid, 0.);
-            for _ in 0..ctx.num_samples {
-                let speed = 100.;
-                let dx = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).cos();
-                let dy = ((speed * 90.01 * self.sample_index as f32) / ctx.sample_rate_hz).sin();
-                let delta = Vec2::new(dx, dy);
-                self.sample_index += 1;
-                let mut v = offset + delta * object.height;
-                v.x = v.x.clamp(object.right, object.left);
-                self.buf.push(v);
+            match object.typ {
+                ObjectType::Test => self.sample_test(&object, ctx),
+                ObjectType::Enemy1 => self.sample_enemy1(&object, ctx),
             }
         } else {
             self.buf.resize(ctx.num_samples, Vec2::ZERO);
@@ -120,6 +146,7 @@ fn sig(scene: FrameSig<FrameSigVar<RenderedScene>>) -> StereoPair<SigBoxed<f32>>
                     object: (get_nth_object.clone())(i),
                     buf: Vec::new(),
                     sample_index: 0,
+                    rng: StdRng::from_rng(&mut rand::rng()),
                 })
                 .shared()
             })
@@ -369,20 +396,29 @@ impl ConnectedPoint {
 }
 
 #[derive(Clone, Copy, Debug)]
+enum ObjectType {
+    Test,
+    Enemy1,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct Object {
+    typ: ObjectType,
     position: Vec2,
     radius: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct ProjectedObject {
+    typ: ObjectType,
     occluded: bool,
     screen_space_seg: Seg2,
     screen_space_position: Vec2,
 }
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct RenderedObject {
+    typ: ObjectType,
     left: f32,
     right: f32,
     mid: f32,
@@ -419,12 +455,14 @@ impl State {
         };
         let objects = vec![
             Object {
+                typ: ObjectType::Test,
                 position: Vec2::new(5., 10.),
-                radius: 1.,
+                radius: 0.5,
             },
             Object {
+                typ: ObjectType::Enemy1,
                 position: Vec2::new(12., 12.),
-                radius: 1.,
+                radius: 0.5,
             },
         ];
         Self {
@@ -591,6 +629,7 @@ impl State {
                     return None;
                 }
                 Some(ProjectedObject {
+                    typ: o.typ,
                     screen_space_seg,
                     occluded: false,
                     screen_space_position,
@@ -718,6 +757,7 @@ impl State {
             let mid = screen_space_project(object.screen_space_position);
             if left.x > -DISPLAY_WIDTH / 2. && right.x < DISPLAY_WIDTH / 2. {
                 rendered_objects.push(RenderedObject {
+                    typ: object.typ,
                     left: left.x,
                     right: right.x,
                     mid: mid.x,
@@ -906,6 +946,7 @@ fn debug_render_map2_3d(state: Res<State>, mut gizmos: Gizmos) {
         gizmos.line_2d(start, end, Color::srgb(0., 1., 0.));
     }
     for RenderedObject {
+        typ: _,
         left,
         right,
         mid,
