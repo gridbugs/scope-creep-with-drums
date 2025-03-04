@@ -19,12 +19,14 @@ const SCALE: f32 = 40.;
 
 mod geom;
 mod procgen;
+mod text;
 
 #[derive(Clone)]
 struct SceneTracer {
     scene: FrameSig<FrameSigVar<RenderedScene>>,
     buf: Vec<Vec2>,
     index: usize,
+    text_index: usize,
 }
 
 impl SigT for SceneTracer {
@@ -36,7 +38,7 @@ impl SigT for SceneTracer {
         if scene.world.is_empty() {
             self.buf.resize(ctx.num_samples, Vec2::ZERO);
         } else {
-            while self.buf.len() < ctx.num_samples {
+            while self.buf.len() < (4 * ctx.num_samples) / 5 {
                 let mut start = true;
                 let rendered_world_seg = scene.world[self.index % scene.world.len()];
                 let brightness = 20. / rendered_world_seg.mid_depth;
@@ -51,6 +53,11 @@ impl SigT for SceneTracer {
                     start = !start;
                 }
                 self.index += 1;
+            }
+            while self.buf.len() < ctx.num_samples {
+                let text_point = scene.text[self.text_index % scene.text.len()];
+                self.buf.push(text_point);
+                self.text_index += 1;
             }
         }
         &self.buf
@@ -190,6 +197,7 @@ fn sig(
             scene: scene.clone(),
             buf: Vec::new(),
             index: 0,
+            text_index: 0,
         };
         let base_scale = 0.;
         let post_scale = 0.001;
@@ -248,7 +256,6 @@ fn sig(
                 Channel::Right => 1.5,
             })
             .build()
-            .exp_01(-1.)
             + 0.0001)
             .map(|x| x.min(1.));
         let death_noise_env = adsr_linear_01(player_alive.clone().map(|b| !b))
@@ -256,7 +263,7 @@ fn sig(
             .build();
         (((((world + objects) * post_scale)
             + (noise::brown() * ghost_noise_level)
-            + (noise::brown() * death_noise_env))
+            + (noise::brown() * death_noise_env * 10.))
             .clamp_symetric(10.)
             / SCALE)
             * death_amp_env)
@@ -533,10 +540,32 @@ struct RenderedWorldSeg {
     mid_depth: f32,
 }
 
+fn render_text(text: &str, screen_coord: Vec2) -> Vec<Vec2> {
+    let kerning = 0.2;
+    let char_width = 0.8;
+    let scale = 20.0;
+    let num_reps = 2;
+    text.chars()
+        .enumerate()
+        .flat_map(|(i, ch)| {
+            let shape = text::char_shape(ch);
+            shape
+                .iter()
+                .cycle()
+                .take(shape.len() * num_reps)
+                .map(move |&v| {
+                    let v = Vec2::new(v.x * char_width, -v.y);
+                    screen_coord + (v + Vec2::new(i as f32 * (kerning + char_width), 0.)) * scale
+                })
+        })
+        .collect()
+}
+
 #[derive(Clone, Default, Debug)]
 struct RenderedScene {
     world: Vec<RenderedWorldSeg>,
     objects: Vec<RenderedObject>,
+    text: Vec<Vec2>,
 }
 
 #[derive(Resource)]
@@ -606,7 +635,7 @@ impl State {
             map2,
             player,
             objects,
-            paused: false,
+            paused: true,
         }
     }
 
@@ -936,6 +965,10 @@ impl State {
         RenderedScene {
             world,
             objects: rendered_objects,
+            text: render_text(
+                "SPHINX OF BLACK QUARTZ JUDGE MY VOW 0123456789",
+                Vec2::new(-DISPLAY_WIDTH / 2. + 10., -DISPLAY_HEIGHT / 2. + 20.),
+            ),
         }
     }
 }
@@ -1105,7 +1138,11 @@ fn project_through_objects(
 
 #[allow(unused)]
 fn debug_render_map2_3d(state: Res<State>, mut gizmos: Gizmos) {
-    let RenderedScene { world, objects } = state.render();
+    let RenderedScene {
+        world,
+        objects,
+        text: _,
+    } = state.render();
     for RenderedWorldSeg {
         projected_seg: Seg2 { start, end },
         ..
