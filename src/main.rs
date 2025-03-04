@@ -7,19 +7,20 @@ use caw::prelude::*;
 use core::f32;
 use geom::{Circle, *};
 use grid_2d::Coord;
+use lazy_static::lazy_static;
 use procgen::{Map1, Map2};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{cmp::Ordering, collections::VecDeque, mem};
 
-const DISPLAY_WIDTH: f32 = 960.;
-const DISPLAY_HEIGHT: f32 = 720.;
-const TOP_LEFT_OFFSET: Vec2 = Vec2::new(-DISPLAY_WIDTH / 2., DISPLAY_HEIGHT / 2.);
-const MAX_NUM_SAMPLES: usize = 4_000;
-const SCALE: f32 = 40.;
-
 mod geom;
 mod procgen;
 mod text;
+
+const DISPLAY_WIDTH: f32 = 960.;
+const DISPLAY_HEIGHT: f32 = 720.;
+const TOP_LEFT_OFFSET: Vec2 = Vec2::new(-DISPLAY_WIDTH / 2., DISPLAY_HEIGHT / 2.);
+const MAX_NUM_SAMPLES: usize = 6_000;
+const SCALE: f32 = 40.;
 
 #[derive(Clone)]
 struct SceneTracer {
@@ -64,25 +65,116 @@ impl SigT for SceneTracer {
     }
 }
 
+lazy_static! {
+    static ref ARTIFACT_1_LABEL: Vec<Vec2> = render_text("ARTIFACT OF ORDER", Vec2::ZERO);
+    static ref ARTIFACT_1_LABEL_WIDTH: f32 = {
+        ARTIFACT_1_LABEL
+            .iter()
+            .map(|v| v.x)
+            .max_by(|a, b| a.total_cmp(b))
+            .unwrap()
+    };
+    static ref ARTIFACT_2_LABEL: Vec<Vec2> = render_text("ARTIFACT OF HARMONY", Vec2::ZERO);
+    static ref ARTIFACT_2_LABEL_WIDTH: f32 = {
+        ARTIFACT_2_LABEL
+            .iter()
+            .map(|v| v.x)
+            .max_by(|a, b| a.total_cmp(b))
+            .unwrap()
+    };
+    static ref ARTIFACT_3_LABEL: Vec<Vec2> = render_text("ARTIFACT OF CHAOS", Vec2::ZERO);
+    static ref ARTIFACT_3_LABEL_WIDTH: f32 = {
+        ARTIFACT_3_LABEL
+            .iter()
+            .map(|v| v.x)
+            .max_by(|a, b| a.total_cmp(b))
+            .unwrap()
+    };
+}
+
 #[derive(Clone)]
 struct ObjectRenderer<O: FrameSigT<Item = Option<RenderedObject>>> {
     object: O,
     buf: Vec<Vec2>,
     sample_index: u64,
+    text_index: usize,
     rng: StdRng,
 }
 
 impl<O: FrameSigT<Item = Option<RenderedObject>>> ObjectRenderer<O> {
-    fn sample_test(&mut self, object: &RenderedObject, ctx: &SigCtx) {
-        let offset = Vec2::new(object.mid, 0.);
-        for _ in 0..ctx.num_samples {
+    fn sample_artifact3(&mut self, object: &RenderedObject, ctx: &SigCtx) {
+        let offset = Vec2::new(object.mid, -0.5 * object.height);
+        for _ in 0..(ctx.num_samples / 2) {
             let speed = 100.;
-            let dx = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).cos();
-            let dy = ((speed * 90.01 * self.sample_index as f32) / ctx.sample_rate_hz).sin();
-            let delta = Vec2::new(dx, dy);
+            let r = self.rng.random::<f32>() * 2.0 - 1.0;
+            let dx = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).cos() * r;
+            let dy = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).sin() * r;
+            let delta = Vec2::new(dx, dy) * 0.5;
             self.sample_index += 1;
             let mut v = offset + delta * object.height;
             v.x = v.x.clamp(object.right, object.left);
+            self.buf.push(v);
+        }
+        while self.buf.len() < ctx.num_samples {
+            let mut v = (ARTIFACT_3_LABEL[self.text_index % ARTIFACT_3_LABEL.len()]
+                - Vec2::new(*ARTIFACT_3_LABEL_WIDTH / 2., 0.))
+                * object.height
+                * 0.005
+                + offset
+                + Vec2::new(0., object.height * 0.7);
+            v.x = v.x.clamp(object.right, object.left);
+            self.text_index += 1;
+            self.buf.push(v);
+        }
+    }
+
+    fn sample_artifact2(&mut self, object: &RenderedObject, ctx: &SigCtx) {
+        let offset = Vec2::new(object.mid, -0.5 * object.height);
+        for _ in 0..(ctx.num_samples / 2) {
+            let speed = 100.;
+            let dx = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).cos();
+            let dy = ((speed * 90.01 * self.sample_index as f32) / ctx.sample_rate_hz).sin();
+            let delta = Vec2::new(dx, dy) * 0.5;
+            self.sample_index += 1;
+            let mut v = offset + delta * object.height;
+            v.x = v.x.clamp(object.right, object.left);
+            self.buf.push(v);
+        }
+        while self.buf.len() < ctx.num_samples {
+            let mut v = (ARTIFACT_2_LABEL[self.text_index % ARTIFACT_2_LABEL.len()]
+                - Vec2::new(*ARTIFACT_2_LABEL_WIDTH / 2., 0.))
+                * object.height
+                * 0.005
+                + offset
+                + Vec2::new(0., object.height * 0.7);
+            v.x = v.x.clamp(object.right, object.left);
+            self.text_index += 1;
+            self.buf.push(v);
+        }
+    }
+
+    fn sample_artifact1(&mut self, object: &RenderedObject, ctx: &SigCtx) {
+        let offset = Vec2::new(object.mid, -0.5 * object.height);
+        for _ in 0..(ctx.num_samples / 2) {
+            let speed = 100.;
+            let effect = ((speed * 2. * self.sample_index as f32) / ctx.sample_rate_hz).sin();
+            let dx = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).cos() * effect;
+            let dy = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).sin() * effect;
+            let delta = Vec2::new(dx, dy) * 0.5;
+            self.sample_index += 1;
+            let mut v = offset + delta * object.height;
+            v.x = v.x.clamp(object.right, object.left);
+            self.buf.push(v);
+        }
+        while self.buf.len() < ctx.num_samples {
+            let mut v = (ARTIFACT_1_LABEL[self.text_index % ARTIFACT_1_LABEL.len()]
+                - Vec2::new(*ARTIFACT_1_LABEL_WIDTH / 2., 0.))
+                * object.height
+                * 0.005
+                + offset
+                + Vec2::new(0., object.height * 0.7);
+            v.x = v.x.clamp(object.right, object.left);
+            self.text_index += 1;
             self.buf.push(v);
         }
     }
@@ -162,7 +254,9 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
         self.buf.clear();
         if let Some(object) = self.object.frame_sample(ctx) {
             match object.typ {
-                ObjectType::Test => self.sample_test(&object, ctx),
+                ObjectType::Artifact1 => self.sample_artifact1(&object, ctx),
+                ObjectType::Artifact2 => self.sample_artifact2(&object, ctx),
+                ObjectType::Artifact3 => self.sample_artifact3(&object, ctx),
                 ObjectType::Ghost => self.sample_ghost(&object, ctx),
                 ObjectType::Slug => self.sample_slug(&object, ctx),
             }
@@ -211,6 +305,7 @@ fn sig(
                     object: (get_nth_object.clone())(i),
                     buf: Vec::new(),
                     sample_index: 0,
+                    text_index: 0,
                     rng: StdRng::from_rng(&mut rand::rng()),
                 })
                 .shared()
@@ -379,7 +474,7 @@ fn render_scope(scope_state: Res<ScopeState>, window: Query<&Window>, mut gizmos
         gizmos.line_2d(
             prev,
             sample,
-            Color::srgba(current_color.x, current_color.y, current_color.z, 0.1),
+            Color::srgba(current_color.x, current_color.y, current_color.z, 0.2),
         );
         prev = sample;
     }
@@ -505,7 +600,9 @@ impl ConnectedPoint {
 
 #[derive(Clone, Copy, Debug)]
 enum ObjectType {
-    Test,
+    Artifact1,
+    Artifact2,
+    Artifact3,
     Ghost,
     Slug,
 }
@@ -544,7 +641,7 @@ fn render_text(text: &str, screen_coord: Vec2) -> Vec<Vec2> {
     let kerning = 0.2;
     let char_width = 0.8;
     let scale = 20.0;
-    let num_reps = 2;
+    let num_reps = 1;
     text.chars()
         .enumerate()
         .flat_map(|(i, ch)| {
@@ -615,18 +712,28 @@ impl State {
         };
         let objects = vec![
             Object {
-                typ: ObjectType::Test,
-                position: Vec2::new(5., 10.),
+                typ: ObjectType::Artifact1,
+                position: Vec2::new(11., 12.),
+                radius: 0.5,
+            },
+            Object {
+                typ: ObjectType::Artifact2,
+                position: Vec2::new(11., 13.),
+                radius: 0.5,
+            },
+            Object {
+                typ: ObjectType::Artifact3,
+                position: Vec2::new(11., 14.),
                 radius: 0.5,
             },
             Object {
                 typ: ObjectType::Slug,
-                position: Vec2::new(5., 10.),
+                position: Vec2::new(100., 10.),
                 radius: 0.5,
             },
             Object {
                 typ: ObjectType::Ghost,
-                position: Vec2::new(5., 10.),
+                position: Vec2::new(100., 10.),
                 radius: 0.5,
             },
         ];
@@ -678,7 +785,7 @@ impl State {
                         );
                     }
                 }
-                ObjectType::Test => (),
+                ObjectType::Artifact1 | ObjectType::Artifact2 | ObjectType::Artifact3 => (),
             }
         }
     }
@@ -966,7 +1073,7 @@ impl State {
             world,
             objects: rendered_objects,
             text: render_text(
-                "SPHINX OF BLACK QUARTZ JUDGE MY VOW 0123456789",
+                "HEALTH: 2/3",
                 Vec2::new(-DISPLAY_WIDTH / 2. + 10., -DISPLAY_HEIGHT / 2. + 20.),
             ),
         }
@@ -1245,7 +1352,7 @@ fn passives_update(mut state: ResMut<State>) {
                     player_alive = false;
                 }
             }
-            ObjectType::Test => (),
+            ObjectType::Artifact1 | ObjectType::Artifact2 | ObjectType::Artifact3 => (),
         }
     }
     state.player.alive = player_alive;

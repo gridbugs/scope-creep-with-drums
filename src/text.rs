@@ -417,6 +417,34 @@ const DIGIT_9: &[Vec2] = &[
     Vec2::new(1.0, 1.0),
 ];
 
+const PERIOD: &[Vec2] = &[
+    Vec2::new(0.4, 1.0),
+    Vec2::new(0.4, 0.8),
+    Vec2::new(0.6, 0.8),
+    Vec2::new(0.6, 1.0),
+    Vec2::new(0.4, 1.0),
+];
+
+const COLON: &[Vec2] = &[
+    Vec2::new(0.4, 1.0),
+    Vec2::new(0.4, 0.8),
+    Vec2::new(0.6, 0.8),
+    Vec2::new(0.6, 1.0),
+    Vec2::new(0.4, 1.0),
+    Vec2::new(0.4, 0.5),
+    Vec2::new(0.4, 0.3),
+    Vec2::new(0.6, 0.3),
+    Vec2::new(0.6, 0.5),
+    Vec2::new(0.4, 0.5),
+    Vec2::new(0.4, 1.0),
+];
+
+const SLASH: &[Vec2] = &[
+    Vec2::new(0.0, 1.0),
+    Vec2::new(1.0, 0.0),
+    Vec2::new(0.0, 1.0),
+];
+
 pub fn char_shape(ch: char) -> &'static [Vec2] {
     match ch {
         ' ' => SPACE,
@@ -456,6 +484,9 @@ pub fn char_shape(ch: char) -> &'static [Vec2] {
         '7' => DIGIT_7,
         '8' => DIGIT_8,
         '9' => DIGIT_9,
+        ':' => COLON,
+        '/' => SLASH,
+        '.' => PERIOD,
         _ => UNKNOWN,
     }
 }

@@ -12,3 +12,4 @@ direction = "0.18"
 rand = "0.9"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 log = "0.4"
+lazy_static = "1.5"
