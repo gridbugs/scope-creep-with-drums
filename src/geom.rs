@@ -97,4 +97,42 @@ impl Seg2 {
             .intersect(self)
             .is_some()
     }
+
+    pub fn with_x_min(&mut self) -> &mut Vec2 {
+        if self.start.x < self.end.x {
+            &mut self.start
+        } else {
+            &mut self.end
+        }
+    }
+
+    pub fn with_x_max(&mut self) -> &mut Vec2 {
+        if self.start.x > self.end.x {
+            &mut self.start
+        } else {
+            &mut self.end
+        }
+    }
+
+    pub fn with_y_min(&mut self) -> &mut Vec2 {
+        if self.start.y < self.end.y {
+            &mut self.start
+        } else {
+            &mut self.end
+        }
+    }
+
+    pub fn with_y_max(&mut self) -> &mut Vec2 {
+        if self.start.y > self.end.y {
+            &mut self.start
+        } else {
+            &mut self.end
+        }
+    }
+    pub fn add_vec(self, v: Vec2) -> Self {
+        Self {
+            start: self.start + v,
+            end: self.end + v,
+        }
+    }
 }

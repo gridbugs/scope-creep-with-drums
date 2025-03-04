@@ -20,7 +20,7 @@ const DISPLAY_WIDTH: f32 = 960.;
 const DISPLAY_HEIGHT: f32 = 720.;
 const TOP_LEFT_OFFSET: Vec2 = Vec2::new(-DISPLAY_WIDTH / 2., DISPLAY_HEIGHT / 2.);
 const MAX_NUM_SAMPLES: usize = 6_000;
-const SCALE: f32 = 40.;
+const SCALE: f32 = 20.;
 
 #[derive(Clone)]
 struct SceneTracer {
@@ -28,6 +28,41 @@ struct SceneTracer {
     buf: Vec<Vec2>,
     index: usize,
     text_index: usize,
+}
+
+const SCREEN_RIGHT: Seg2 = Seg2 {
+    start: Vec2::new(DISPLAY_WIDTH / 2., DISPLAY_HEIGHT / 2.),
+    end: Vec2::new(DISPLAY_WIDTH / 2., -DISPLAY_HEIGHT / 2.),
+};
+
+const SCREEN_BOTTOM: Seg2 = Seg2 {
+    start: Vec2::new(DISPLAY_WIDTH / 2., -DISPLAY_HEIGHT / 2.),
+    end: Vec2::new(-DISPLAY_WIDTH / 2., -DISPLAY_HEIGHT / 2.),
+};
+const SCREEN_LEFT: Seg2 = Seg2 {
+    start: Vec2::new(-DISPLAY_WIDTH / 2., -DISPLAY_HEIGHT / 2.),
+    end: Vec2::new(-DISPLAY_WIDTH / 2., DISPLAY_HEIGHT / 2.),
+};
+const SCREEN_TOP: Seg2 = Seg2 {
+    start: Vec2::new(-DISPLAY_WIDTH / 2., DISPLAY_HEIGHT / 2.),
+    end: Vec2::new(DISPLAY_WIDTH / 2., DISPLAY_HEIGHT / 2.),
+};
+
+fn clip_seg_within_display(mut s: Seg2) -> Seg2 {
+    let pad = 20.;
+    if let Some(clip) = s.intersect(&(SCREEN_LEFT.add_vec(Vec2::new(-pad, 0.)))) {
+        *s.with_x_min() = clip;
+    }
+    if let Some(clip) = s.intersect(&(SCREEN_RIGHT.add_vec(Vec2::new(pad, 0.)))) {
+        *s.with_x_max() = clip;
+    }
+    if let Some(clip) = s.intersect(&(SCREEN_BOTTOM.add_vec(Vec2::new(0., -pad)))) {
+        *s.with_y_min() = clip;
+    }
+    if let Some(clip) = s.intersect(&(SCREEN_TOP.add_vec(Vec2::new(0., pad)))) {
+        *s.with_y_max() = clip;
+    }
+    s
 }
 
 impl SigT for SceneTracer {
@@ -45,7 +80,7 @@ impl SigT for SceneTracer {
                 let brightness = 20. / rendered_world_seg.mid_depth;
                 let num_reps = (brightness as usize).clamp(1, 10) * 2;
                 for _ in 0..num_reps {
-                    let seg = rendered_world_seg.projected_seg;
+                    let seg = clip_seg_within_display(rendered_world_seg.projected_seg);
                     if start {
                         self.buf.push(seg.start);
                     } else {
@@ -358,8 +393,8 @@ fn sig(
             .build();
         (((((world + objects) * post_scale)
             + (noise::brown() * ghost_noise_level)
-            + (noise::brown() * death_noise_env * 10.))
-            .clamp_symetric(10.)
+            + (noise::brown() * death_noise_env * 4.))
+            .clamp_symetric(3.)
             / SCALE)
             * death_amp_env)
             .boxed()
@@ -710,39 +745,12 @@ impl State {
             facing_rad: 180f32.to_radians(),
             alive: true,
         };
-        let objects = vec![
-            Object {
-                typ: ObjectType::Artifact1,
-                position: Vec2::new(11., 12.),
-                radius: 0.5,
-            },
-            Object {
-                typ: ObjectType::Artifact2,
-                position: Vec2::new(11., 13.),
-                radius: 0.5,
-            },
-            Object {
-                typ: ObjectType::Artifact3,
-                position: Vec2::new(11., 14.),
-                radius: 0.5,
-            },
-            Object {
-                typ: ObjectType::Slug,
-                position: Vec2::new(100., 10.),
-                radius: 0.5,
-            },
-            Object {
-                typ: ObjectType::Ghost,
-                position: Vec2::new(100., 10.),
-                radius: 0.5,
-            },
-        ];
         Self {
             map1,
             map2,
             player,
-            objects,
-            paused: true,
+            objects: Vec::new(),
+            paused: false,
         }
     }
 
@@ -804,12 +812,43 @@ impl State {
     }
 
     fn reset(&mut self) {
-        let mut seed_rng = StdRng::seed_from_u64(1);
+        let mut seed_rng = rand::rng();
         let seed = seed_rng.random();
         log::info!("seed: {:?}", seed);
         let mut rng = StdRng::from_seed(seed);
-        self.map1.generate(&mut rng);
+        let (map1, player_coord) = Map1::make_full(&mut rng);
+        self.player.position = coord_to_vec(player_coord);
+        self.player.facing_rad = 90f32.to_radians();
+        self.map1 = map1;
         self.map2 = self.map1.to_map2();
+        self.objects = vec![
+            Object {
+                typ: ObjectType::Artifact1,
+                position: self.player.position + Vec2::new(2., 3.),
+                radius: 0.5,
+            },
+            Object {
+                typ: ObjectType::Artifact2,
+                position: self.player.position + Vec2::new(1., 3.),
+                radius: 0.5,
+            },
+            Object {
+                typ: ObjectType::Artifact3,
+                position: self.player.position + Vec2::new(0., 3.),
+                radius: 0.5,
+            },
+            Object {
+                typ: ObjectType::Slug,
+                position: self.player.position + Vec2::new(-2., 3.),
+                radius: 0.5,
+            },
+            Object {
+                typ: ObjectType::Ghost,
+                position: self.player.position + Vec2::new(-10., 3.),
+                radius: 0.5,
+            },
+        ];
+        log::info!("Generated map!");
     }
 
     fn all_walls(&self) -> impl Iterator<Item = Seg2> {
@@ -1093,7 +1132,7 @@ fn coord_to_vec(coord: Coord) -> Vec2 {
 #[allow(unused)]
 fn debug_render_map1(state: Res<State>, mut gizmos: Gizmos) {
     let cell_size = Vec2::new(5., 5.);
-    let offset = TOP_LEFT_OFFSET + Vec2::new(40., -140.);
+    let offset = TOP_LEFT_OFFSET + Vec2::new(40., -340.);
     for (coord, &cell) in state.map1.grid.enumerate() {
         if cell {
             gizmos.rect_2d(
@@ -1123,7 +1162,7 @@ fn debug_render_map1(state: Res<State>, mut gizmos: Gizmos) {
 #[allow(unused)]
 fn debug_render_map2(state: Res<State>, mut gizmos: Gizmos) {
     let wall_length = 5.;
-    let offset = TOP_LEFT_OFFSET + Vec2::new(390., -140.);
+    let offset = TOP_LEFT_OFFSET + Vec2::new(650., -240.);
     let transform = |v| (state.player.transform_abs_vec2_to_rel(v)) * wall_length + offset;
     for wall_strip in &state.map2.wall_strips {
         gizmos.linestrip_2d(wall_strip.iter().map(transform), Color::srgb(0., 1., 1.));
@@ -1143,7 +1182,7 @@ fn debug_render_map2(state: Res<State>, mut gizmos: Gizmos) {
 fn debug_render_map2_pruned(state: Res<State>, mut gizmos: Gizmos) {
     let pruned_walls = state.prune_geometry();
     let wall_length = 5.;
-    let offset = TOP_LEFT_OFFSET + Vec2::new(640., -140.);
+    let offset = TOP_LEFT_OFFSET + Vec2::new(200., -640.);
     let transform = |v| v * wall_length + offset;
     for wall_strip in pruned_walls {
         gizmos.linestrip_2d(

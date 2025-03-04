@@ -86,6 +86,12 @@ impl Map1 {
         }
     }
 
+    pub fn new_with_size(size: Size) -> Self {
+        Self {
+            grid: Grid::new_copy(size, true),
+        }
+    }
+
     fn generate_cave<R: Rng>(&mut self, rng: &mut R) {
         let num_steps = 4;
         let num_clean_steps = 10;
@@ -208,7 +214,7 @@ impl Map1 {
         let mut seen = HashSet::new();
         let mut ret = Vec::new();
         for (coord, alive) in self.grid.enumerate() {
-            if !alive || !seen.insert(coord) {
+            if !seen.insert(coord) || !alive {
                 continue;
             }
             let mut blob = HashSet::new();
@@ -216,19 +222,130 @@ impl Map1 {
             let mut to_visit = VecDeque::new();
             to_visit.push_back(coord);
             while let Some(coord) = to_visit.pop_front() {
+                seen.insert(coord);
                 for d in CardinalDirections {
                     let neighbour_coord = coord + d.coord();
-                    if self.grid.get(neighbour_coord) == Some(&true) && blob.insert(neighbour_coord)
+                    if blob.insert(neighbour_coord) && self.grid.get(neighbour_coord) == Some(&true)
                     {
                         to_visit.push_back(neighbour_coord);
                     }
                 }
             }
             if !blob.contains(&Coord::new(0, 0)) {
+                log::info!("adding blob of size {}", blob.len());
                 ret.push(blob);
+            } else {
+                log::info!("skipping non-floating blob of size {}", blob.len());
             }
         }
         ret
+    }
+
+    fn carve_out_open_space_from(&mut self, other: &Self, offset: Coord) {
+        for (c, open) in other.grid.enumerate() {
+            if !*open {
+                *self.grid.get_checked_mut(c + offset) = false;
+            }
+        }
+    }
+
+    pub fn make_full<R: Rng>(rng: &mut R) -> (Self, Coord) {
+        let dungeon_size = Size::new(30, 30);
+        let corridor_offset_x = 0;
+        let corridor_offset_y = 10;
+        let hub_size = Size::new(8, 8);
+        let total_size = Size::new(
+            (dungeon_size.width() + corridor_offset_x) * 2 + hub_size.width(),
+            dungeon_size.height() * 2,
+        );
+        let hub_centre = Size::new(
+            total_size.width() / 2,
+            dungeon_size.height() + corridor_offset_y,
+        )
+        .to_coord()
+        .unwrap();
+        let hub_top_left = hub_centre - hub_size.to_coord().unwrap() / 2;
+        let full_map = 'outer: loop {
+            let dungeons = (0..3)
+                .map(|_| {
+                    let mut map = Self::new_with_size(dungeon_size);
+                    map.generate(rng);
+                    map
+                })
+                .collect::<Vec<_>>();
+            let mut full_map = Self::new_with_size(total_size);
+            for c in hub_size.coord_iter_row_major() {
+                *full_map.grid.get_checked_mut(c + hub_top_left) = false;
+            }
+            full_map.carve_out_open_space_from(
+                &dungeons[0],
+                Coord::new(0, dungeon_size.height() as i32),
+            );
+            full_map.carve_out_open_space_from(
+                &dungeons[2],
+                Coord::new(
+                    (total_size.width() - dungeon_size.width()) as i32,
+                    dungeon_size.height() as i32,
+                ),
+            );
+            full_map.carve_out_open_space_from(
+                &dungeons[1],
+                Coord::new((total_size.width() - dungeon_size.width()) as i32 / 2, 0),
+            );
+            let mut corridor_cursor = hub_centre - Coord::new(hub_size.width() as i32 / 2 + 1, 1);
+            loop {
+                match full_map.grid.get_mut(corridor_cursor) {
+                    None => continue 'outer,
+                    Some(b) => {
+                        let stop = !(*b);
+                        *b = false;
+                        *full_map
+                            .grid
+                            .get_checked_mut(corridor_cursor + Coord::new(0, 1)) = false;
+                        if stop {
+                            break;
+                        }
+                        corridor_cursor += Coord::new(-1, 0);
+                    }
+                }
+            }
+            let mut corridor_cursor = hub_centre + Coord::new(hub_size.width() as i32 / 2, -1);
+            loop {
+                match full_map.grid.get_mut(corridor_cursor) {
+                    None => continue 'outer,
+                    Some(b) => {
+                        let stop = !(*b);
+                        *b = false;
+                        *full_map
+                            .grid
+                            .get_checked_mut(corridor_cursor + Coord::new(0, 1)) = false;
+                        if stop {
+                            break;
+                        }
+                        corridor_cursor += Coord::new(1, 0);
+                    }
+                }
+            }
+            let mut corridor_cursor = hub_centre - Coord::new(1, hub_size.height() as i32 / 2 + 1);
+            loop {
+                match full_map.grid.get_mut(corridor_cursor) {
+                    None => continue 'outer,
+                    Some(b) => {
+                        let stop = !(*b);
+                        *b = false;
+                        *full_map
+                            .grid
+                            .get_checked_mut(corridor_cursor + Coord::new(1, 0)) = false;
+                        if stop {
+                            break;
+                        }
+                        corridor_cursor += Coord::new(0, -1);
+                    }
+                }
+            }
+            break full_map;
+        };
+        (full_map, hub_centre)
     }
 
     pub fn to_map2(&self) -> Map2 {
