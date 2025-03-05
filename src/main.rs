@@ -954,6 +954,18 @@ impl State {
             if runs.last().unwrap().is_empty() {
                 runs.pop();
             }
+            if runs.len() >= 2 && &runs[0][0] == runs.last().unwrap().last().unwrap() {
+                // The end of the last wall strip is the same as the start of the first wall strip.
+                // This happens when a wall forming a closed loop is clipped, and now the region of
+                // wall from the original starting point to the clipping plane, and the region of
+                // wall from the clipping plane back to the original starting point are split into
+                // two wall strips. Rejoin them in this case.
+                let original_start = mem::take(&mut runs[0]);
+                let mut original_end = runs.pop().unwrap();
+                assert_eq!(original_start[0], original_end.pop().unwrap());
+                original_end.extend(original_start);
+                runs[0] = original_end;
+            }
             pruned_walls.extend(runs);
         }
         for linestrip in &mut pruned_walls {
@@ -1418,7 +1430,7 @@ fn debug_render_map2_3d(state: Res<State>, mut gizmos: Gizmos) {
         ..
     } in world
     {
-        gizmos.line_2d(start, end, Color::srgb(0., 1., 0.));
+        gizmos.line_2d(start, end, Color::srgb(0., 0., 1.));
     }
     for RenderedObject {
         typ: _,

@@ -146,6 +146,25 @@ impl Map1 {
                     };
                 }
             }
+            // remove diagonals
+            let mut to_remove = Vec::new();
+            for (coord, &current) in self.grid.enumerate() {
+                if let Some(&below) = self.grid.get(coord + Coord::new(0, 1)) {
+                    if let Some(&right) = self.grid.get(coord + Coord::new(1, 0)) {
+                        if let Some(&below_right) = self.grid.get(coord + Coord::new(1, 1)) {
+                            if current == below_right && right == below && current != right {
+                                to_remove.push(coord);
+                            }
+                        }
+                    }
+                }
+            }
+            for coord in to_remove {
+                *self.grid.get_checked_mut(coord) = false;
+                *self.grid.get_checked_mut(coord + Coord::new(0, 1)) = false;
+                *self.grid.get_checked_mut(coord + Coord::new(1, 0)) = false;
+                *self.grid.get_checked_mut(coord + Coord::new(1, 1)) = false;
+            }
             // find the largest contiguous open area
             let mut largest = HashSet::new();
             let mut largest_candidate = HashSet::new();
@@ -225,7 +244,7 @@ impl Map1 {
                 seen.insert(coord);
                 for d in CardinalDirections {
                     let neighbour_coord = coord + d.coord();
-                    if blob.insert(neighbour_coord) && self.grid.get(neighbour_coord) == Some(&true)
+                    if self.grid.get(neighbour_coord) == Some(&true) && blob.insert(neighbour_coord)
                     {
                         to_visit.push_back(neighbour_coord);
                     }
