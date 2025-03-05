@@ -723,7 +723,7 @@ fn move_object_with_wall_collision_detection(mut position: Vec2, delta: Vec2, ma
     'outer: for _ in 0..num_steps {
         let test_position = position + step;
         for w in all_walls(map) {
-            if w.overlaps_with_circle(&Circle {
+            if w.grow(-0.01).overlaps_with_circle(&Circle {
                 centre: test_position,
                 radius: OBJECT_RADIUS,
             }) {
@@ -763,7 +763,7 @@ impl State {
         'outer: for _ in 0..num_steps {
             let test_position = position + step;
             for w in self.all_walls() {
-                if w.overlaps_with_circle(&Circle {
+                if w.grow(-0.01).overlaps_with_circle(&Circle {
                     centre: test_position,
                     radius: OBJECT_RADIUS,
                 }) {
@@ -1090,8 +1090,8 @@ impl State {
         // reverse the lines along the bottom of the image to reduce rendering noise
         bottom_lines.reverse();
         let mut world = Vec::new();
-        world.extend(vertical_lines);
         world.extend(top_lines);
+        world.extend(vertical_lines);
         world.extend(bottom_lines);
         let mut rendered_objects = Vec::new();
         for object in objects {
