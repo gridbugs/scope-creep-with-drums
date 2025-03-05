@@ -150,6 +150,8 @@ lazy_static! {
             .max_by(|a, b| a.total_cmp(b))
             .unwrap()
     };
+    static ref HEALTH_SYMBOL: Vec<Vec2> = render_text("h", Vec2::ZERO, 2);
+    static ref MANA_SYMBOL: Vec<Vec2> = render_text("s", Vec2::ZERO, 2);
 }
 
 #[derive(Clone)]
@@ -305,6 +307,33 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> ObjectRenderer<O> {
             self.buf.push(v);
         }
     }
+
+    fn sample_health(&mut self, object: &RenderedObject, ctx: &SigCtx) {
+        let offset = Vec2::new(object.mid, -0.5 * object.height);
+        while self.buf.len() < ctx.num_samples {
+            let mut v = (HEALTH_SYMBOL[self.text_index % HEALTH_SYMBOL.len()]
+                - Vec2::new(-0.5, 0.))
+                * object.height
+                * 0.05
+                + offset;
+            v.x = v.x.clamp(object.right, object.left);
+            self.text_index += 1;
+            self.buf.push(v);
+        }
+    }
+
+    fn sample_mana(&mut self, object: &RenderedObject, ctx: &SigCtx) {
+        let offset = Vec2::new(object.mid, -0.5 * object.height);
+        while self.buf.len() < ctx.num_samples {
+            let mut v = (MANA_SYMBOL[self.text_index % MANA_SYMBOL.len()] - Vec2::new(-0.5, 0.))
+                * object.height
+                * 0.05
+                + offset;
+            v.x = v.x.clamp(object.right, object.left);
+            self.text_index += 1;
+            self.buf.push(v);
+        }
+    }
 }
 
 impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
@@ -319,6 +348,8 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
                 ObjectType::Artifact3 => self.sample_artifact3(&object, ctx),
                 ObjectType::Ghost => self.sample_ghost(&object, ctx),
                 ObjectType::Slug => self.sample_slug(&object, ctx),
+                ObjectType::Health => self.sample_health(&object, ctx),
+                ObjectType::Mana => self.sample_mana(&object, ctx),
             }
         } else {
             self.buf.resize(ctx.num_samples, Vec2::ZERO);
@@ -331,6 +362,7 @@ fn sig(
     scene: FrameSig<FrameSigVar<RenderedScene>>,
     dist_to_nearest_ghost: FrameSig<FrameSigVar<f32>>,
     player_alive: FrameSig<FrameSigVar<bool>>,
+    player_damage: FrameSig<FrameSigVar<bool>>,
 ) -> StereoPair<SigBoxed<f32>> {
     let get_nth_object = {
         let scene = scene.clone();
@@ -413,11 +445,13 @@ fn sig(
             .build()
             + 0.0001)
             .map(|x| x.min(1.));
+        let damage_env = adsr_linear_01(player_damage.clone()).release_s(1.0).build();
         let death_noise_env = adsr_linear_01(player_alive.clone().map(|b| !b))
             .attack_s(2.)
             .build();
         (((((world + objects) * post_scale)
             + (noise::brown() * ghost_noise_level)
+            + (noise::brown() * damage_env * 0.05)
             + (noise::brown() * death_noise_env * 4.))
             .clamp_symetric(3.)
             / SCALE)
@@ -431,6 +465,7 @@ struct AudioState {
     rendered_scene: FrameSig<FrameSigVar<RenderedScene>>,
     dist_to_nearest_ghost: FrameSig<FrameSigVar<f32>>,
     player_alive: FrameSig<FrameSigVar<bool>>,
+    player_damage: FrameSig<FrameSigVar<bool>>,
 }
 
 impl AudioState {
@@ -438,6 +473,7 @@ impl AudioState {
         rendered_scene: FrameSig<FrameSigVar<RenderedScene>>,
         dist_to_nearest_ghost: FrameSig<FrameSigVar<f32>>,
         player_alive: FrameSig<FrameSigVar<bool>>,
+        player_damage: FrameSig<FrameSigVar<bool>>,
     ) -> Self {
         let player = Player::new()
             .unwrap()
@@ -446,6 +482,7 @@ impl AudioState {
                     rendered_scene.clone(),
                     dist_to_nearest_ghost.clone(),
                     player_alive.clone(),
+                    player_damage.clone(),
                 ),
                 ConfigOwned {
                     system_latency_s: 0.0167,
@@ -458,6 +495,7 @@ impl AudioState {
             rendered_scene,
             dist_to_nearest_ghost,
             player_alive,
+            player_damage,
         }
     }
 
@@ -492,10 +530,12 @@ fn setup_caw_player(world: &mut World) {
     let rendered_scene = frame_sig_var(RenderedScene::default());
     let dist_to_nearest_ghost = frame_sig_var(f32::INFINITY);
     let player_alive = frame_sig_var(true);
+    let player_damage = frame_sig_var(true);
     world.insert_non_send_resource(AudioState::new(
         rendered_scene,
         dist_to_nearest_ghost,
         player_alive,
+        player_damage,
     ));
     world.insert_resource(ScopeState::new());
 }
@@ -541,10 +581,34 @@ fn render_scope(scope_state: Res<ScopeState>, window: Query<&Window>, mut gizmos
 }
 
 #[derive(Debug)]
+struct Meter {
+    current: i32,
+    max: i32,
+}
+
+impl Meter {
+    fn incr(&mut self) {
+        self.current = (self.current + 1).min(self.max);
+    }
+    fn decr(&mut self) {
+        self.current = (self.current - 1).max(0);
+    }
+    fn is_max(&self) -> bool {
+        self.current == self.max
+    }
+    fn is_zero(&self) -> bool {
+        self.current == 0
+    }
+}
+
+#[derive(Debug)]
 struct PlayerCharacter {
     position: Vec2,
     facing_rad: f32,
     alive: bool,
+    health: Meter,
+    mana: Meter,
+    iframes: u64,
 }
 
 impl PlayerCharacter {
@@ -583,6 +647,15 @@ impl PlayerCharacter {
             self.position,
             self.position + self.facing_vec2_normalized() * 5.,
         ]
+    }
+    fn take_damage(&mut self) {
+        if self.iframes == 0 {
+            self.health.decr();
+            if self.health.is_zero() {
+                self.alive = false;
+            }
+            self.iframes = 120;
+        }
     }
 }
 
@@ -665,6 +738,8 @@ enum ObjectType {
     Artifact3,
     Ghost,
     Slug,
+    Health,
+    Mana,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -802,13 +877,16 @@ impl State {
             position: Vec2::new(12., 12.),
             facing_rad: 180f32.to_radians(),
             alive: true,
+            health: Meter { current: 2, max: 2 },
+            mana: Meter { current: 2, max: 2 },
+            iframes: 0,
         };
         Self {
             map1,
             map2,
             player,
             objects: Vec::new(),
-            paused: true,
+            paused: false,
             show_map: false,
             seen_walls: HashSet::new(),
             frame_count: 0,
@@ -854,7 +932,11 @@ impl State {
                         );
                     }
                 }
-                ObjectType::Artifact1 | ObjectType::Artifact2 | ObjectType::Artifact3 => (),
+                ObjectType::Artifact1
+                | ObjectType::Artifact2
+                | ObjectType::Artifact3
+                | ObjectType::Health
+                | ObjectType::Mana => (),
             }
         }
     }
@@ -884,18 +966,13 @@ impl State {
         self.map2 = self.map1.to_map2();
         self.objects = vec![
             Object {
-                typ: ObjectType::Artifact1,
+                typ: ObjectType::Health,
                 position: self.player.position + Vec2::new(2., 3.),
                 radius: 0.5,
             },
             Object {
-                typ: ObjectType::Artifact2,
+                typ: ObjectType::Mana,
                 position: self.player.position + Vec2::new(1., 3.),
-                radius: 0.5,
-            },
-            Object {
-                typ: ObjectType::Artifact3,
-                position: self.player.position + Vec2::new(0., 3.),
                 radius: 0.5,
             },
             Object {
@@ -903,11 +980,17 @@ impl State {
                 position: self.player.position + Vec2::new(-2., 3.),
                 radius: 0.5,
             },
+            /*
+            Object {
+                typ: ObjectType::Artifact3,
+                position: self.player.position + Vec2::new(0., 3.),
+                radius: 0.5,
+            },
             Object {
                 typ: ObjectType::Ghost,
                 position: self.player.position + Vec2::new(-10., 3.),
                 radius: 0.5,
-            },
+            }, */
         ];
         log::info!("Generated map!");
     }
@@ -1204,7 +1287,14 @@ impl State {
 
     fn hud(&self) -> Vec<Vec2> {
         render_text(
-            format!("h1/2 s1/2").as_str(),
+            format!(
+                "h{}/{} s{}/{}",
+                self.player.health.current,
+                self.player.health.max,
+                self.player.mana.current,
+                self.player.mana.max
+            )
+            .as_str(),
             Vec2::new(-DISPLAY_WIDTH / 2. + 10., -DISPLAY_HEIGHT / 2. + 20.),
             4,
         )
@@ -1252,6 +1342,42 @@ impl State {
         } else {
             self.render_3d()
         }
+    }
+
+    fn passive_update(&mut self, audio_state: &mut AudioState) {
+        let mut damage_this_frame = false;
+        let mut to_remove = Vec::new();
+        for (i, o) in self.objects.iter().enumerate() {
+            match o.typ {
+                ObjectType::Ghost | ObjectType::Slug => {
+                    if o.position.distance(self.player.position) < OBJECT_RADIUS * 2. {
+                        self.player.take_damage();
+                        damage_this_frame = true;
+                    }
+                }
+                ObjectType::Health => {
+                    if o.position.distance(self.player.position) < OBJECT_RADIUS * 2.
+                        && !self.player.health.is_max()
+                    {
+                        self.player.health.incr();
+                        to_remove.push(i);
+                    }
+                }
+                ObjectType::Mana => {
+                    if o.position.distance(self.player.position) < OBJECT_RADIUS * 2.
+                        && !self.player.mana.is_max()
+                    {
+                        self.player.mana.incr();
+                        to_remove.push(i);
+                    }
+                }
+                ObjectType::Artifact1 | ObjectType::Artifact2 | ObjectType::Artifact3 => (),
+            }
+        }
+        for i in to_remove {
+            self.objects.swap_remove(i);
+        }
+        audio_state.player_damage.0.set(damage_this_frame);
     }
 }
 
@@ -1519,19 +1645,8 @@ fn enemy_update(mut state: ResMut<State>) {
     }
 }
 
-fn passives_update(mut state: ResMut<State>) {
-    let mut player_alive = state.player.alive;
-    for o in &state.objects {
-        match o.typ {
-            ObjectType::Ghost | ObjectType::Slug => {
-                if o.position.distance(state.player.position) < OBJECT_RADIUS * 2. {
-                    player_alive = false;
-                }
-            }
-            ObjectType::Artifact1 | ObjectType::Artifact2 | ObjectType::Artifact3 => (),
-        }
-    }
-    state.player.alive = player_alive;
+fn passives_update(mut state: ResMut<State>, mut audio_state: NonSendMut<AudioState>) {
+    state.passive_update(&mut audio_state);
 }
 
 fn update_general(mut state: ResMut<State>) {
@@ -1539,6 +1654,7 @@ fn update_general(mut state: ResMut<State>) {
         state.seen_walls.insert(HashableSeg::from_seg(w));
     }
     state.frame_count += 1;
+    state.player.iframes = state.player.iframes.saturating_sub(1);
 }
 
 fn main() {
