@@ -1615,9 +1615,13 @@ fn input_update(
     if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
         delta += Vec2::new(1., 0.);
     }
+    let sprint = keys.pressed(KeyCode::ShiftLeft);
     state.show_map = keys.pressed(KeyCode::Tab);
     if delta != Vec2::ZERO {
         delta = delta.normalize();
+    }
+    if sprint {
+        delta *= 2.;
     }
     state.player_walk(delta);
 }
