@@ -126,7 +126,7 @@ impl SigT for SceneTracer {
 }
 
 lazy_static! {
-    static ref ARTIFACT_1_LABEL: Vec<Vec2> = render_text("ARTIFACT OF ORDER", Vec2::ZERO, 2);
+    static ref ARTIFACT_1_LABEL: Vec<Vec2> = render_text("ARTIFACT OF ORDER", Vec2::ZERO, 2, 0.8);
     static ref ARTIFACT_1_LABEL_WIDTH: f32 = {
         ARTIFACT_1_LABEL
             .iter()
@@ -134,7 +134,7 @@ lazy_static! {
             .max_by(|a, b| a.total_cmp(b))
             .unwrap()
     };
-    static ref ARTIFACT_2_LABEL: Vec<Vec2> = render_text("ARTIFACT OF HARMONY", Vec2::ZERO, 2);
+    static ref ARTIFACT_2_LABEL: Vec<Vec2> = render_text("ARTIFACT OF HARMONY", Vec2::ZERO, 2, 0.8);
     static ref ARTIFACT_2_LABEL_WIDTH: f32 = {
         ARTIFACT_2_LABEL
             .iter()
@@ -142,7 +142,7 @@ lazy_static! {
             .max_by(|a, b| a.total_cmp(b))
             .unwrap()
     };
-    static ref ARTIFACT_3_LABEL: Vec<Vec2> = render_text("ARTIFACT OF CHAOS", Vec2::ZERO, 2);
+    static ref ARTIFACT_3_LABEL: Vec<Vec2> = render_text("ARTIFACT OF CHAOS", Vec2::ZERO, 2, 0.8);
     static ref ARTIFACT_3_LABEL_WIDTH: f32 = {
         ARTIFACT_3_LABEL
             .iter()
@@ -150,8 +150,8 @@ lazy_static! {
             .max_by(|a, b| a.total_cmp(b))
             .unwrap()
     };
-    static ref HEALTH_SYMBOL: Vec<Vec2> = render_text("h", Vec2::ZERO, 2);
-    static ref MANA_SYMBOL: Vec<Vec2> = render_text("s", Vec2::ZERO, 2);
+    static ref HEALTH_SYMBOL: Vec<Vec2> = render_text("h", Vec2::ZERO, 2, 1.);
+    static ref MANA_SYMBOL: Vec<Vec2> = render_text("s", Vec2::ZERO, 2, 1.);
 }
 
 #[derive(Clone)]
@@ -772,9 +772,8 @@ struct RenderedWorldSeg {
     mid_depth: f32,
 }
 
-fn render_text(text: &str, screen_coord: Vec2, num_reps: usize) -> Vec<Vec2> {
+fn render_text(text: &str, screen_coord: Vec2, num_reps: usize, char_width: f32) -> Vec<Vec2> {
     let kerning = 0.2;
-    let char_width = 0.8;
     let scale = 20.0;
     text.chars()
         .enumerate()
@@ -789,13 +788,6 @@ fn render_text(text: &str, screen_coord: Vec2, num_reps: usize) -> Vec<Vec2> {
                     screen_coord + (v + Vec2::new(i as f32 * (kerning + char_width), 0.)) * scale
                 })
                 .collect::<Vec<_>>();
-            /*
-            // Move the cursor below the letter so the bottom of the letter is visible boev the
-            // connection between this and the following letter.
-            if let Some(last) = shape.last() {
-                shape.push(last - Vec2::new(0., SCALE * 0.3));
-            }
-            */
             shape
         })
         .collect()
@@ -1297,6 +1289,7 @@ impl State {
             .as_str(),
             Vec2::new(-DISPLAY_WIDTH / 2. + 10., -DISPLAY_HEIGHT / 2. + 20.),
             4,
+            0.8,
         )
     }
 
