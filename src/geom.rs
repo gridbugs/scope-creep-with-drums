@@ -12,7 +12,7 @@ impl Circle {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Seg2 {
     pub start: Vec2,
     pub end: Vec2,
@@ -133,6 +133,18 @@ impl Seg2 {
         Self {
             start: self.start + v,
             end: self.end + v,
+        }
+    }
+    pub fn map<F: FnMut(Vec2) -> Vec2>(self, mut f: F) -> Self {
+        Self {
+            start: f(self.start),
+            end: f(self.end),
+        }
+    }
+    pub fn flip(self) -> Self {
+        Self {
+            start: self.end,
+            end: self.start,
         }
     }
 }

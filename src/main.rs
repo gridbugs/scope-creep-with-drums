@@ -10,7 +10,11 @@ use grid_2d::Coord;
 use lazy_static::lazy_static;
 use procgen::{Map1, Map2};
 use rand::{Rng, SeedableRng, rngs::StdRng};
-use std::{cmp::Ordering, collections::VecDeque, mem};
+use std::{
+    cmp::Ordering,
+    collections::{HashSet, VecDeque},
+    mem,
+};
 
 mod geom;
 mod procgen;
@@ -21,6 +25,27 @@ const DISPLAY_HEIGHT: f32 = 720.;
 const TOP_LEFT_OFFSET: Vec2 = Vec2::new(-DISPLAY_WIDTH / 2., DISPLAY_HEIGHT / 2.);
 const MAX_NUM_SAMPLES: usize = 6_000;
 const SCALE: f32 = 20.;
+
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
+struct HashableSeg {
+    start: (i32, i32),
+    end: (i32, i32),
+}
+
+impl HashableSeg {
+    fn from_seg(seg: Seg2) -> Self {
+        Self {
+            start: (seg.start.x as i32, seg.start.y as i32),
+            end: (seg.end.x as i32, seg.end.y as i32),
+        }
+    }
+    fn to_seg(self) -> Seg2 {
+        Seg2 {
+            start: Vec2::new(self.start.0 as f32, self.start.1 as f32),
+            end: Vec2::new(self.end.0 as f32, self.end.1 as f32),
+        }
+    }
+}
 
 #[derive(Clone)]
 struct SceneTracer {
@@ -101,7 +126,7 @@ impl SigT for SceneTracer {
 }
 
 lazy_static! {
-    static ref ARTIFACT_1_LABEL: Vec<Vec2> = render_text("ARTIFACT OF ORDER", Vec2::ZERO);
+    static ref ARTIFACT_1_LABEL: Vec<Vec2> = render_text("ARTIFACT OF ORDER", Vec2::ZERO, 2);
     static ref ARTIFACT_1_LABEL_WIDTH: f32 = {
         ARTIFACT_1_LABEL
             .iter()
@@ -109,7 +134,7 @@ lazy_static! {
             .max_by(|a, b| a.total_cmp(b))
             .unwrap()
     };
-    static ref ARTIFACT_2_LABEL: Vec<Vec2> = render_text("ARTIFACT OF HARMONY", Vec2::ZERO);
+    static ref ARTIFACT_2_LABEL: Vec<Vec2> = render_text("ARTIFACT OF HARMONY", Vec2::ZERO, 2);
     static ref ARTIFACT_2_LABEL_WIDTH: f32 = {
         ARTIFACT_2_LABEL
             .iter()
@@ -117,7 +142,7 @@ lazy_static! {
             .max_by(|a, b| a.total_cmp(b))
             .unwrap()
     };
-    static ref ARTIFACT_3_LABEL: Vec<Vec2> = render_text("ARTIFACT OF CHAOS", Vec2::ZERO);
+    static ref ARTIFACT_3_LABEL: Vec<Vec2> = render_text("ARTIFACT OF CHAOS", Vec2::ZERO, 2);
     static ref ARTIFACT_3_LABEL_WIDTH: f32 = {
         ARTIFACT_3_LABEL
             .iter()
@@ -672,16 +697,15 @@ struct RenderedWorldSeg {
     mid_depth: f32,
 }
 
-fn render_text(text: &str, screen_coord: Vec2) -> Vec<Vec2> {
+fn render_text(text: &str, screen_coord: Vec2, num_reps: usize) -> Vec<Vec2> {
     let kerning = 0.2;
     let char_width = 0.8;
     let scale = 20.0;
-    let num_reps = 1;
     text.chars()
         .enumerate()
         .flat_map(|(i, ch)| {
             let shape = text::char_shape(ch);
-            shape
+            let shape = shape
                 .iter()
                 .cycle()
                 .take(shape.len() * num_reps)
@@ -689,6 +713,15 @@ fn render_text(text: &str, screen_coord: Vec2) -> Vec<Vec2> {
                     let v = Vec2::new(v.x * char_width, -v.y);
                     screen_coord + (v + Vec2::new(i as f32 * (kerning + char_width), 0.)) * scale
                 })
+                .collect::<Vec<_>>();
+            /*
+            // Move the cursor below the letter so the bottom of the letter is visible boev the
+            // connection between this and the following letter.
+            if let Some(last) = shape.last() {
+                shape.push(last - Vec2::new(0., SCALE * 0.3));
+            }
+            */
+            shape
         })
         .collect()
 }
@@ -707,12 +740,37 @@ struct State {
     player: PlayerCharacter,
     objects: Vec<Object>,
     paused: bool,
+    show_map: bool,
+    seen_walls: HashSet<HashableSeg>,
+    frame_count: u64,
 }
 
 fn all_walls(map: &Map2) -> impl Iterator<Item = Seg2> {
     map.wall_strips
         .iter()
         .flat_map(|wall_strip| wall_strip.windows(2).map(|w| Seg2::new(w[0], w[1])))
+}
+
+fn all_walls_with_visible_corner(map: &Map2, player_position: Vec2) -> impl Iterator<Item = Seg2> {
+    all_walls(map).filter(move |this| {
+        let a = Seg2::new(player_position, this.start);
+        let b = Seg2::new(player_position, this.end);
+        for other in all_walls(map) {
+            if other != *this {
+                if let Some(a_ict) = other.intersect(&a) {
+                    if this.start.distance(a_ict) > 0.01 {
+                        return false;
+                    }
+                }
+                if let Some(b_ict) = other.intersect(&b) {
+                    if this.end.distance(b_ict) > 0.01 {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    })
 }
 
 const OBJECT_RADIUS: f32 = 0.25;
@@ -750,7 +808,10 @@ impl State {
             map2,
             player,
             objects: Vec::new(),
-            paused: false,
+            paused: true,
+            show_map: false,
+            seen_walls: HashSet::new(),
+            frame_count: 0,
         }
     }
 
@@ -903,7 +964,7 @@ impl State {
         pruned_walls
     }
 
-    fn render(&self) -> RenderedScene {
+    fn render_3d(&self) -> RenderedScene {
         let eps = 0.0001;
         let pruned_walls = self.prune_geometry();
         let all_walls = pruned_walls
@@ -925,14 +986,7 @@ impl State {
                         // is part of.
                         !(wall.start == cp.point || wall.end == cp.point)
                     })
-                    .any(|wall| {
-                        if ray_from_eye.intersect(&wall.grow(eps)).is_some() {
-                            //log::info!("excluding {:?}", cp.point);
-                            true
-                        } else {
-                            false
-                        }
-                    })
+                    .any(|wall| ray_from_eye.intersect(&wall.grow(eps)).is_some())
             })
             .collect::<Vec<_>>();
         let project_to_wall = |v: Vec2| {
@@ -1049,7 +1103,6 @@ impl State {
         for projected_point in projected_points.iter() {
             let start = screen_space_project(projected_point.screen_space_coord);
             if start.x > -DISPLAY_WIDTH / 2. && start.x < DISPLAY_WIDTH / 2. {
-                //log::info!("{:?}", start);
                 let end = Vec2::new(start.x, -start.y);
                 vertical_lines.push(RenderedWorldSeg {
                     projected_seg: Seg2::new(start, end),
@@ -1090,9 +1143,31 @@ impl State {
         // reverse the lines along the bottom of the image to reduce rendering noise
         bottom_lines.reverse();
         let mut world = Vec::new();
+        let last_vertical_line = vertical_lines.last();
+        let fixup = last_vertical_line
+            .cloned()
+            .zip(top_lines.last().cloned())
+            .zip(bottom_lines.first().cloned())
+            .map(|((mut vertical, mut top), mut bottom)| {
+                if vertical.projected_seg.start.y < vertical.projected_seg.end.y {
+                    vertical.projected_seg = vertical.projected_seg.flip();
+                }
+                top.projected_seg = top.projected_seg.flip();
+                bottom.projected_seg = bottom.projected_seg.flip();
+                vec![top, vertical, bottom]
+            });
         world.extend(top_lines);
-        world.extend(vertical_lines);
+        if let Some(fixup) = fixup {
+            world.extend(fixup);
+        }
         world.extend(bottom_lines);
+        world.extend(vertical_lines);
+        let mut world2 = world.clone();
+        world2.reverse();
+        for w in &mut world2 {
+            mem::swap(&mut w.projected_seg.start, &mut w.projected_seg.end);
+        }
+        world.extend(world2);
         let mut rendered_objects = Vec::new();
         for object in objects {
             let left = screen_space_project(object.screen_space_seg.start);
@@ -1111,10 +1186,59 @@ impl State {
         RenderedScene {
             world,
             objects: rendered_objects,
-            text: render_text(
-                "HEALTH: 2/3",
-                Vec2::new(-DISPLAY_WIDTH / 2. + 10., -DISPLAY_HEIGHT / 2. + 20.),
-            ),
+            text: self.hud(),
+        }
+    }
+
+    fn hud(&self) -> Vec<Vec2> {
+        render_text(
+            format!("h1/2 s1/2").as_str(),
+            Vec2::new(-DISPLAY_WIDTH / 2. + 10., -DISPLAY_HEIGHT / 2. + 20.),
+            4,
+        )
+    }
+
+    fn render_map(&self) -> RenderedScene {
+        let player = vec![
+            Seg2 {
+                start: self.player.position - self.player.facing_vec2_normalized()
+                    + self.player.right90() / 2.,
+                end: self.player.position,
+            },
+            Seg2 {
+                start: self.player.position
+                    - self.player.facing_vec2_normalized()
+                    - self.player.right90() / 2.,
+                end: self.player.position,
+            },
+        ];
+        let mut world = self
+            .seen_walls
+            .iter()
+            .map(|s| s.to_seg())
+            .chain(player)
+            .flat_map(|s| {
+                let seg = s.map(|v| (v - self.player.position) * 10.);
+                let s = RenderedWorldSeg {
+                    projected_seg: seg,
+                    mid_depth: 0.,
+                };
+                (0..1).map(move |_| s)
+            })
+            .collect::<Vec<_>>();
+        world.sort_by(|a, b| a.projected_seg.start.y.total_cmp(&b.projected_seg.start.y));
+        RenderedScene {
+            world,
+            objects: Vec::new(),
+            text: self.hud(),
+        }
+    }
+
+    fn render(&self) -> RenderedScene {
+        if self.show_map {
+            self.render_map()
+        } else {
+            self.render_3d()
         }
     }
 }
@@ -1353,6 +1477,7 @@ fn input_update(
     if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
         delta += Vec2::new(1., 0.);
     }
+    state.show_map = keys.pressed(KeyCode::Tab);
     if delta != Vec2::ZERO {
         delta = delta.normalize();
     }
@@ -1397,6 +1522,13 @@ fn passives_update(mut state: ResMut<State>) {
     state.player.alive = player_alive;
 }
 
+fn update_general(mut state: ResMut<State>) {
+    for w in all_walls_with_visible_corner(&state.map2, state.player.position).collect::<Vec<_>>() {
+        state.seen_walls.insert(HashableSeg::from_seg(w));
+    }
+    state.frame_count += 1;
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -1423,6 +1555,7 @@ fn main() {
                 input_update,
                 enemy_update,
                 passives_update,
+                update_general,
                 render_scope,
             ),
         )
