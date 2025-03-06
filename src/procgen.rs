@@ -79,6 +79,49 @@ fn cardinal_directions_to_linestrip(start: Coord, directions: &[CardinalDirectio
     ret
 }
 
+pub struct FullMap {
+    pub map1: Map1,
+    pub map2: Map2,
+    pub end_doors: [Vec<Vec2>; 2],
+    pub end_doors_mid_point: Vec2,
+    pub exit_point: Vec2,
+}
+
+impl FullMap {
+    pub fn make<R: Rng>(rng: &mut R) -> Self {
+        let (map1, _player_coord, end_corridor_entrance) = Map1::make_full(rng);
+        let map2 = map1.to_map2();
+        let gap = 0.001;
+        let width = 0.2;
+        let end_corridor_entrance_mid = Vec2::new(
+            end_corridor_entrance.x as f32,
+            end_corridor_entrance.y as f32 + 1.0 - width - gap,
+        );
+        let end_door_1 = vec![
+            end_corridor_entrance_mid + Vec2::new(1., 0.),
+            end_corridor_entrance_mid + Vec2::new(1., width),
+            end_corridor_entrance_mid + Vec2::new(gap, width),
+            end_corridor_entrance_mid + Vec2::new(gap, 0.0),
+            end_corridor_entrance_mid + Vec2::new(1., 0.),
+        ];
+        let end_door_2 = vec![
+            end_corridor_entrance_mid + Vec2::new(-1., 0.),
+            end_corridor_entrance_mid + Vec2::new(-1., width),
+            end_corridor_entrance_mid + Vec2::new(-gap, width),
+            end_corridor_entrance_mid + Vec2::new(-gap, 0.0),
+            end_corridor_entrance_mid + Vec2::new(-1., 0.),
+        ];
+        let exit_point = end_corridor_entrance_mid + Vec2::new(0.0, 16.);
+        Self {
+            map1,
+            map2,
+            end_doors: [end_door_1, end_door_2],
+            end_doors_mid_point: end_corridor_entrance_mid,
+            exit_point,
+        }
+    }
+}
+
 impl Map1 {
     pub fn new() -> Self {
         Self {
@@ -268,7 +311,7 @@ impl Map1 {
         }
     }
 
-    pub fn make_full<R: Rng>(rng: &mut R) -> (Self, Coord) {
+    pub fn make_full<R: Rng>(rng: &mut R) -> (Self, Coord, Coord) {
         let dungeon_size = Size::new(30, 30);
         let corridor_offset_x = 0;
         let corridor_offset_y = 10;
@@ -362,9 +405,23 @@ impl Map1 {
                     }
                 }
             }
+            let mut corridor_cursor = hub_centre + Coord::new(0, hub_size.height() as i32 / 2 - 1);
+            for _ in 0..40 {
+                match full_map.grid.get_mut(corridor_cursor) {
+                    None => (),
+                    Some(b) => {
+                        *b = false;
+                        *full_map
+                            .grid
+                            .get_checked_mut(corridor_cursor + Coord::new(-1, 0)) = false;
+                    }
+                }
+                corridor_cursor += Coord::new(0, 1);
+            }
             break full_map;
         };
-        (full_map, hub_centre)
+        let end_corridor_entrance = hub_centre + Coord::new(0, hub_size.height() as i32 / 2 - 1);
+        (full_map, hub_centre, end_corridor_entrance)
     }
 
     pub fn to_map2(&self) -> Map2 {

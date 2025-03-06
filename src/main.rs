@@ -8,7 +8,7 @@ use core::f32;
 use geom::{Circle, *};
 use grid_2d::Coord;
 use lazy_static::lazy_static;
-use procgen::{Map1, Map2};
+use procgen::{FullMap, Map1, Map2};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{
     cmp::Ordering,
@@ -150,10 +150,30 @@ lazy_static! {
             .max_by(|a, b| a.total_cmp(b))
             .unwrap()
     };
+    static ref END_DOORS_LABEL: Vec<Vec2> = render_text(
+        "THESE DOORS WILL OPEN WHEN THE 3 ARTIFACTS HAVE BEEN RETURNED",
+        Vec2::ZERO,
+        1,
+        0.8
+    );
+    static ref END_DOORS_LABEL_WIDTH: f32 = {
+        END_DOORS_LABEL
+            .iter()
+            .map(|v| v.x)
+            .max_by(|a, b| a.total_cmp(b))
+            .unwrap()
+    };
+    static ref EXIT_LABEL: Vec<Vec2> = render_text("THE END", Vec2::ZERO, 4, 0.8);
+    static ref EXIT_LABEL_WIDTH: f32 = {
+        EXIT_LABEL
+            .iter()
+            .map(|v| v.x)
+            .max_by(|a, b| a.total_cmp(b))
+            .unwrap()
+    };
     static ref HEALTH_SYMBOL: Vec<Vec2> = render_text("h", Vec2::ZERO, 2, 1.);
     static ref MANA_SYMBOL: Vec<Vec2> = render_text("s", Vec2::ZERO, 2, 1.);
 }
-
 #[derive(Clone)]
 struct ObjectRenderer<O: FrameSigT<Item = Option<RenderedObject>>> {
     object: O,
@@ -334,6 +354,35 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> ObjectRenderer<O> {
             self.buf.push(v);
         }
     }
+
+    fn sample_end_doors_label(&mut self, object: &RenderedObject, ctx: &SigCtx) {
+        let offset = Vec2::new(object.mid, 0.6 * object.height);
+        while self.buf.len() < ctx.num_samples {
+            let mut v = (END_DOORS_LABEL[self.text_index % END_DOORS_LABEL.len()]
+                - Vec2::new(*END_DOORS_LABEL_WIDTH / 2., 0.))
+                * object.height
+                * 0.005
+                + offset
+                + Vec2::new(0., object.height);
+            v.x = v.x.clamp(object.right, object.left);
+            self.text_index += 1;
+            self.buf.push(v);
+        }
+    }
+
+    fn sample_exit(&mut self, object: &RenderedObject, ctx: &SigCtx) {
+        let offset = Vec2::new(object.mid, 0.0);
+        while self.buf.len() < ctx.num_samples {
+            let mut v = (EXIT_LABEL[self.text_index % EXIT_LABEL.len()]
+                - Vec2::new(*EXIT_LABEL_WIDTH / 2., 0.))
+                * object.height
+                * 0.005
+                + offset;
+            v.x = v.x.clamp(object.right, object.left);
+            self.text_index += 1;
+            self.buf.push(v);
+        }
+    }
 }
 
 impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
@@ -350,6 +399,8 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
                 ObjectType::Slug => self.sample_slug(&object, ctx),
                 ObjectType::Health => self.sample_health(&object, ctx),
                 ObjectType::Mana => self.sample_mana(&object, ctx),
+                ObjectType::EndDoorLabel => self.sample_end_doors_label(&object, ctx),
+                ObjectType::Exit => self.sample_exit(&object, ctx),
             }
         } else {
             self.buf.resize(ctx.num_samples, Vec2::ZERO);
@@ -363,6 +414,8 @@ fn sig(
     dist_to_nearest_ghost: FrameSig<FrameSigVar<f32>>,
     player_alive: FrameSig<FrameSigVar<bool>>,
     player_damage: FrameSig<FrameSigVar<bool>>,
+    door_opening: FrameSig<FrameSigVar<bool>>,
+    win: FrameSig<FrameSigVar<bool>>,
 ) -> StereoPair<SigBoxed<f32>> {
     let get_nth_object = {
         let scene = scene.clone();
@@ -445,17 +498,33 @@ fn sig(
             .build()
             + 0.0001)
             .map(|x| x.min(1.));
+        let win_amp_env = (adsr_linear_01(win.clone().map(|b| !b))
+            .attack_s(0.1)
+            .release_s(match channel {
+                Channel::Left => 2.0,
+                Channel::Right => 2.0,
+            })
+            .build()
+            + 0.0001)
+            .map(|x| x.min(1.));
         let damage_env = adsr_linear_01(player_damage.clone()).release_s(1.0).build();
         let death_noise_env = adsr_linear_01(player_alive.clone().map(|b| !b))
             .attack_s(2.)
             .build();
+        // XXX the gate_to_trig_rising_edge should not be necessary but is due to a bug in caw
+        let door_opening_shake = noise::white().filter(sample_and_hold(
+            Sig(periodic_trig_s(0.05).build()).gate_to_trig_rising_edge(),
+        )) * adsr_linear_01(door_opening.clone()).build()
+            * 0.01;
         (((((world + objects) * post_scale)
+            + door_opening_shake
             + (noise::brown() * ghost_noise_level)
             + (noise::brown() * damage_env * 0.05)
             + (noise::brown() * death_noise_env * 4.))
             .clamp_symetric(3.)
             / SCALE)
-            * death_amp_env)
+            * death_amp_env
+            * win_amp_env)
             .boxed()
     })
 }
@@ -466,6 +535,8 @@ struct AudioState {
     dist_to_nearest_ghost: FrameSig<FrameSigVar<f32>>,
     player_alive: FrameSig<FrameSigVar<bool>>,
     player_damage: FrameSig<FrameSigVar<bool>>,
+    door_opening: FrameSig<FrameSigVar<bool>>,
+    win: FrameSig<FrameSigVar<bool>>,
 }
 
 impl AudioState {
@@ -474,6 +545,8 @@ impl AudioState {
         dist_to_nearest_ghost: FrameSig<FrameSigVar<f32>>,
         player_alive: FrameSig<FrameSigVar<bool>>,
         player_damage: FrameSig<FrameSigVar<bool>>,
+        door_opening: FrameSig<FrameSigVar<bool>>,
+        win: FrameSig<FrameSigVar<bool>>,
     ) -> Self {
         let player = Player::new()
             .unwrap()
@@ -483,6 +556,8 @@ impl AudioState {
                     dist_to_nearest_ghost.clone(),
                     player_alive.clone(),
                     player_damage.clone(),
+                    door_opening.clone(),
+                    win.clone(),
                 ),
                 ConfigOwned {
                     system_latency_s: 0.0167,
@@ -496,6 +571,8 @@ impl AudioState {
             dist_to_nearest_ghost,
             player_alive,
             player_damage,
+            door_opening,
+            win,
         }
     }
 
@@ -531,11 +608,15 @@ fn setup_caw_player(world: &mut World) {
     let dist_to_nearest_ghost = frame_sig_var(f32::INFINITY);
     let player_alive = frame_sig_var(true);
     let player_damage = frame_sig_var(true);
+    let door_opening = frame_sig_var(true);
+    let win = frame_sig_var(true);
     world.insert_non_send_resource(AudioState::new(
         rendered_scene,
         dist_to_nearest_ghost,
         player_alive,
         player_damage,
+        door_opening,
+        win,
     ));
     world.insert_resource(ScopeState::new());
 }
@@ -580,7 +661,7 @@ fn render_scope(scope_state: Res<ScopeState>, window: Query<&Window>, mut gizmos
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Meter {
     current: i32,
     max: i32,
@@ -601,7 +682,7 @@ impl Meter {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct PlayerCharacter {
     position: Vec2,
     facing_rad: f32,
@@ -733,6 +814,8 @@ impl ConnectedPoint {
 
 #[derive(Clone, Copy, Debug)]
 enum ObjectType {
+    EndDoorLabel,
+    Exit,
     Artifact1,
     Artifact2,
     Artifact3,
@@ -810,19 +893,30 @@ struct State {
     show_map: bool,
     seen_walls: HashSet<HashableSeg>,
     frame_count: u64,
+    end_doors: [Vec<Vec2>; 2],
+    doors_opening: bool,
+    door_open_amount: f32,
+    time_spent_near_end: f32,
+    restart_countdown: Option<u64>,
 }
 
-fn all_walls(map: &Map2) -> impl Iterator<Item = Seg2> {
+fn all_walls(map: &Map2, end_doors: &[Vec<Vec2>; 2]) -> Vec<Seg2> {
     map.wall_strips
         .iter()
+        .chain(end_doors)
         .flat_map(|wall_strip| wall_strip.windows(2).map(|w| Seg2::new(w[0], w[1])))
+        .collect()
 }
 
-fn all_walls_with_visible_corner(map: &Map2, player_position: Vec2) -> impl Iterator<Item = Seg2> {
-    all_walls(map).filter(move |this| {
+fn all_walls_with_visible_corner(
+    map: &Map2,
+    player_position: Vec2,
+    end_doors: &[Vec<Vec2>; 2],
+) -> impl Iterator<Item = Seg2> {
+    all_walls(map, end_doors).into_iter().filter(move |this| {
         let a = Seg2::new(player_position, this.start);
         let b = Seg2::new(player_position, this.end);
-        for other in all_walls(map) {
+        for other in all_walls(map, end_doors) {
             if other != *this {
                 if let Some(a_ict) = other.intersect(&a) {
                     if this.start.distance(a_ict) > 0.01 {
@@ -842,12 +936,17 @@ fn all_walls_with_visible_corner(map: &Map2, player_position: Vec2) -> impl Iter
 
 const OBJECT_RADIUS: f32 = 0.25;
 
-fn move_object_with_wall_collision_detection(mut position: Vec2, delta: Vec2, map: &Map2) -> Vec2 {
+fn move_object_with_wall_collision_detection(
+    mut position: Vec2,
+    delta: Vec2,
+    map: &Map2,
+    end_doors: &[Vec<Vec2>; 2],
+) -> Vec2 {
     let num_steps = 10;
     let mut step = delta / num_steps as f32;
     'outer: for _ in 0..num_steps {
         let test_position = position + step;
-        for w in all_walls(map) {
+        for w in all_walls(map, end_doors) {
             if w.grow(-0.01).overlaps_with_circle(&Circle {
                 centre: test_position,
                 radius: OBJECT_RADIUS,
@@ -865,23 +964,20 @@ impl State {
     fn new() -> Self {
         let map1 = Map1::new();
         let map2 = Map2::new();
-        let player = PlayerCharacter {
-            position: Vec2::new(12., 12.),
-            facing_rad: 180f32.to_radians(),
-            alive: true,
-            health: Meter { current: 2, max: 2 },
-            mana: Meter { current: 2, max: 2 },
-            iframes: 0,
-        };
         Self {
             map1,
             map2,
-            player,
+            player: PlayerCharacter::default(),
             objects: Vec::new(),
-            paused: false,
+            paused: true,
             show_map: false,
             seen_walls: HashSet::new(),
             frame_count: 0,
+            end_doors: Default::default(),
+            doors_opening: false,
+            door_open_amount: 0.0,
+            time_spent_near_end: 0.0,
+            restart_countdown: None,
         }
     }
 
@@ -920,7 +1016,10 @@ impl State {
                     if let Some(walk_delta) = (self.player.position - o.position).try_normalize() {
                         let walk_delta = walk_delta * 0.02;
                         o.position = move_object_with_wall_collision_detection(
-                            o.position, walk_delta, &self.map2,
+                            o.position,
+                            walk_delta,
+                            &self.map2,
+                            &self.end_doors,
                         );
                     }
                 }
@@ -928,6 +1027,8 @@ impl State {
                 | ObjectType::Artifact2
                 | ObjectType::Artifact3
                 | ObjectType::Health
+                | ObjectType::EndDoorLabel
+                | ObjectType::Exit
                 | ObjectType::Mana => (),
             }
         }
@@ -951,28 +1052,47 @@ impl State {
         let seed = seed_rng.random();
         log::info!("seed: {:?}", seed);
         let mut rng = StdRng::from_seed(seed);
-        let (map1, player_coord) = Map1::make_full(&mut rng);
-        self.player.position = coord_to_vec(player_coord);
-        self.player.facing_rad = 90f32.to_radians();
+        let FullMap {
+            map1,
+            map2,
+            end_doors,
+            end_doors_mid_point,
+            exit_point,
+        } = FullMap::make(&mut rng);
+        self.end_doors = end_doors;
+        self.door_open_amount = -0.5;
         self.map1 = map1;
-        self.map2 = self.map1.to_map2();
+        self.map2 = map2;
+        self.doors_opening = false;
+        self.time_spent_near_end = 0.0;
+        self.restart_countdown = None;
+        let position = Vec2::new(32.60643, 41.605396);
+        let facing_rad = 0.7207975;
+        self.player = PlayerCharacter {
+            position,
+            facing_rad,
+            alive: true,
+            health: Meter { current: 2, max: 2 },
+            mana: Meter { current: 2, max: 2 },
+            iframes: 0,
+        };
         self.objects = vec![
             Object {
-                typ: ObjectType::Health,
-                position: self.player.position + Vec2::new(2., 3.),
-                radius: 0.5,
+                typ: ObjectType::EndDoorLabel,
+                position: end_doors_mid_point + Vec2::new(0.0, -1.),
+                radius: 2.0,
             },
             Object {
-                typ: ObjectType::Mana,
-                position: self.player.position + Vec2::new(1., 3.),
-                radius: 0.5,
-            },
-            Object {
-                typ: ObjectType::Slug,
-                position: self.player.position + Vec2::new(-2., 3.),
+                typ: ObjectType::Exit,
+                position: exit_point,
                 radius: 0.5,
             },
             /*
+            Object {
+                typ: ObjectType::Slug,
+                position: self.player.position + Vec2::new(0., 0.),
+                radius: 0.5,
+            },
             Object {
                 typ: ObjectType::Artifact3,
                 position: self.player.position + Vec2::new(0., 3.),
@@ -987,14 +1107,18 @@ impl State {
         log::info!("Generated map!");
     }
 
-    fn all_walls(&self) -> impl Iterator<Item = Seg2> {
-        all_walls(&self.map2)
+    fn all_walls(&self) -> Vec<Seg2> {
+        all_walls(&self.map2, &self.end_doors)
+    }
+
+    fn wall_strips(&self) -> impl Iterator<Item = &Vec<Vec2>> {
+        self.map2.wall_strips.iter().chain(self.end_doors.iter())
     }
 
     fn prune_geometry(&self) -> Vec<Vec<Vec2>> {
         let mut pruned_walls = Vec::new();
         let clipping_plane_offset = Vec2::new(0., 0.1);
-        for wall_strip in &self.map2.wall_strips {
+        for wall_strip in self.wall_strips() {
             let wall_strip_rel = wall_strip
                 .iter()
                 .map(|v| self.player.transform_abs_vec2_to_rel(v) - clipping_plane_offset)
@@ -1346,6 +1470,9 @@ impl State {
                     if o.position.distance(self.player.position) < OBJECT_RADIUS * 2. {
                         self.player.take_damage();
                         damage_this_frame = true;
+                        if self.player.health.is_zero() && self.restart_countdown.is_none() {
+                            self.restart_countdown = Some(360);
+                        }
                     }
                 }
                 ObjectType::Health => {
@@ -1364,13 +1491,61 @@ impl State {
                         to_remove.push(i);
                     }
                 }
-                ObjectType::Artifact1 | ObjectType::Artifact2 | ObjectType::Artifact3 => (),
+                ObjectType::Exit => {
+                    if o.position.distance(self.player.position) < OBJECT_RADIUS * 4. {
+                        self.time_spent_near_end += 1.0;
+                    }
+                }
+                ObjectType::Artifact1
+                | ObjectType::Artifact2
+                | ObjectType::Artifact3
+                | ObjectType::EndDoorLabel => (),
             }
         }
         for i in to_remove {
             self.objects.swap_remove(i);
         }
         audio_state.player_damage.0.set(damage_this_frame);
+        audio_state.door_opening.0.set(self.doors_opening);
+        if self.time_spent_near_end > 120.0 {
+            audio_state.win.0.set(true);
+            if self.restart_countdown.is_none() {
+                self.restart_countdown = Some(360);
+            }
+        } else {
+            audio_state.win.0.set(false);
+        }
+    }
+
+    fn start_opening_doors(&mut self) {
+        let mut to_remove = Vec::new();
+        for (i, o) in self.objects.iter().enumerate() {
+            if let ObjectType::EndDoorLabel = o.typ {
+                to_remove.push(i);
+            }
+        }
+        for i in to_remove {
+            self.objects.swap_remove(i);
+        }
+        self.doors_opening = true;
+    }
+
+    fn open_doors(&mut self) {
+        let amount = 0.0025;
+        if self.door_open_amount >= 1.0 {
+            self.doors_opening = false;
+            return;
+        }
+        self.door_open_amount += amount;
+        if self.door_open_amount < 0.0 {
+            return;
+        }
+        for v in self.end_doors[0].iter_mut() {
+            v.x += amount;
+        }
+        for v in self.end_doors[1].iter_mut() {
+            v.x -= amount;
+        }
     }
 }
 
@@ -1579,11 +1754,11 @@ fn debug_render_map2_3d(state: Res<State>, mut gizmos: Gizmos) {
 
 #[allow(unused)]
 fn debug_update(mut state: ResMut<State>, keys: Res<ButtonInput<KeyCode>>) {
-    if keys.just_pressed(KeyCode::KeyR) {
-        state.reset();
-    }
-    if keys.pressed(KeyCode::KeyP) {
+    if keys.just_pressed(KeyCode::KeyP) {
         state.paused = !state.paused;
+    }
+    if keys.just_pressed(KeyCode::KeyO) {
+        state.start_opening_doors();
     }
 }
 
@@ -1594,6 +1769,9 @@ fn input_update(
 ) {
     for ev in evr_motion.read() {
         state.player.rotate(-ev.delta.x);
+    }
+    if keys.just_pressed(KeyCode::KeyR) {
+        state.reset();
     }
     let mut delta = Vec2::ZERO;
     if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
@@ -1608,7 +1786,7 @@ fn input_update(
     if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
         delta += Vec2::new(1., 0.);
     }
-    let sprint = keys.pressed(KeyCode::ShiftLeft);
+    let sprint = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::KeyZ);
     state.show_map = keys.pressed(KeyCode::Tab);
     if delta != Vec2::ZERO {
         delta = delta.normalize();
@@ -1647,11 +1825,22 @@ fn passives_update(mut state: ResMut<State>, mut audio_state: NonSendMut<AudioSt
 }
 
 fn update_general(mut state: ResMut<State>) {
-    for w in all_walls_with_visible_corner(&state.map2, state.player.position).collect::<Vec<_>>() {
+    for w in all_walls_with_visible_corner(&state.map2, state.player.position, &state.end_doors)
+        .collect::<Vec<_>>()
+    {
         state.seen_walls.insert(HashableSeg::from_seg(w));
     }
     state.frame_count += 1;
     state.player.iframes = state.player.iframes.saturating_sub(1);
+    if state.doors_opening {
+        state.open_doors();
+    }
+    if let Some(restart_countdown) = state.restart_countdown.as_mut() {
+        *restart_countdown = restart_countdown.saturating_sub(1);
+    }
+    if state.restart_countdown == Some(0) {
+        state.reset();
+    }
 }
 
 fn main() {
