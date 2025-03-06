@@ -1,7 +1,10 @@
-use bevy::math::Vec2;
+use bevy::math::{Rect, Vec2};
 use direction::{CardinalDirection, CardinalDirections, Direction, Directions, DirectionsCardinal};
 use grid_2d::{Coord, Grid, Size};
-use rand::Rng;
+use rand::{
+    Rng,
+    seq::{IteratorRandom, SliceRandom},
+};
 use std::{
     collections::{HashSet, VecDeque},
     mem,
@@ -9,8 +12,16 @@ use std::{
 
 use crate::coord_to_vec;
 
+pub struct ArtifactCoords(pub Coord, pub Coord, pub Coord);
+
 pub struct Map1 {
     pub grid: Grid<bool>,
+}
+
+impl Default for Map1 {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 fn blob_to_outside_directions(blob: &HashSet<Coord>) -> (Coord, Vec<CardinalDirection>) {
@@ -85,11 +96,23 @@ pub struct FullMap {
     pub end_doors: [Vec<Vec2>; 2],
     pub end_doors_mid_point: Vec2,
     pub exit_point: Vec2,
+    pub artifact_coords: ArtifactCoords,
+    pub hub_rect: Rect,
+    pub item_candidates: Vec<Vec2>,
+    pub enemy_candidates: Vec<Vec2>,
 }
 
 impl FullMap {
     pub fn make<R: Rng>(rng: &mut R) -> Self {
-        let (map1, _player_coord, end_corridor_entrance) = Map1::make_full(rng);
+        let (
+            map1,
+            _player_coord,
+            end_corridor_entrance,
+            artifact_coords,
+            hub_rect,
+            item_candidates,
+            enemy_candidates,
+        ) = Map1::make_full(rng);
         let map2 = map1.to_map2();
         let gap = 0.001;
         let width = 0.2;
@@ -111,13 +134,27 @@ impl FullMap {
             end_corridor_entrance_mid + Vec2::new(-gap, 0.0),
             end_corridor_entrance_mid + Vec2::new(-1., 0.),
         ];
-        let exit_point = end_corridor_entrance_mid + Vec2::new(0.0, 16.);
+        let exit_point = end_corridor_entrance_mid + Vec2::new(0.0, 15.);
+        let mut item_candidates = item_candidates
+            .iter()
+            .map(|c| coord_to_vec(*c) + Vec2::new(0.5, 0.5))
+            .collect::<Vec<_>>();
+        let mut enemy_candidates = enemy_candidates
+            .iter()
+            .map(|c| coord_to_vec(*c) + Vec2::new(0.5, 0.5))
+            .collect::<Vec<_>>();
+        item_candidates.shuffle(rng);
+        enemy_candidates.shuffle(rng);
         Self {
             map1,
             map2,
             end_doors: [end_door_1, end_door_2],
             end_doors_mid_point: end_corridor_entrance_mid,
             exit_point,
+            artifact_coords,
+            hub_rect,
+            item_candidates,
+            enemy_candidates,
         }
     }
 }
@@ -133,6 +170,87 @@ impl Map1 {
         Self {
             grid: Grid::new_copy(size, true),
         }
+    }
+
+    fn candidates(&self) -> impl Iterator<Item = Coord> {
+        self.grid.enumerate().filter_map(|(c, b)| {
+            if *b {
+                return None;
+            }
+            for d in Directions {
+                if self.grid.get(c + d.coord()) != Some(&false) {
+                    return None;
+                }
+            }
+            Some(c)
+        })
+    }
+
+    fn item_and_object_candidates(&self) -> impl Iterator<Item = Coord> {
+        let mut max = Coord::new(0, 0);
+        let mut min = self.grid.size().to_coord().unwrap();
+        for coord in self.candidates() {
+            max.x = max.x.max(coord.x);
+            max.y = max.y.max(coord.y);
+            min.x = min.x.min(coord.x);
+            min.y = min.x.min(coord.y);
+        }
+        self.candidates()
+            .filter(move |c| c.x > min.x && c.x < max.x && c.y > min.y && c.y < max.y)
+    }
+
+    fn top_most_candidate<R: Rng>(&self, rng: &mut R) -> Coord {
+        let mut best = self.grid.size().to_coord().unwrap();
+        'outer: for (c, b) in self.grid.enumerate() {
+            for d in Directions {
+                if self.grid.get(c + d.coord()) != Some(&false) {
+                    continue 'outer;
+                }
+            }
+            if !*b && c.y < best.y {
+                best = c;
+            }
+        }
+        self.candidates()
+            .filter(|c| c.y == best.y)
+            .choose(rng)
+            .unwrap()
+    }
+
+    fn left_most_candidate<R: Rng>(&self, rng: &mut R) -> Coord {
+        let mut best = self.grid.size().to_coord().unwrap();
+        'outer: for (c, b) in self.grid.enumerate() {
+            for d in Directions {
+                if self.grid.get(c + d.coord()) != Some(&false) {
+                    continue 'outer;
+                }
+            }
+            if !*b && c.x < best.x {
+                best = c;
+            }
+        }
+        self.candidates()
+            .filter(|c| c.x == best.x)
+            .choose(rng)
+            .unwrap()
+    }
+
+    fn right_most_candidate<R: Rng>(&self, rng: &mut R) -> Coord {
+        let mut best = Coord::new(0, 0);
+        'outer: for (c, b) in self.grid.enumerate() {
+            for d in Directions {
+                if self.grid.get(c + d.coord()) != Some(&false) {
+                    continue 'outer;
+                }
+            }
+            if !*b && c.x > best.x {
+                best = c;
+            }
+        }
+        self.candidates()
+            .filter(|c| c.x == best.x)
+            .choose(rng)
+            .unwrap()
     }
 
     fn generate_cave<R: Rng>(&mut self, rng: &mut R) {
@@ -311,7 +429,17 @@ impl Map1 {
         }
     }
 
-    pub fn make_full<R: Rng>(rng: &mut R) -> (Self, Coord, Coord) {
+    pub fn make_full<R: Rng>(
+        rng: &mut R,
+    ) -> (
+        Self,
+        Coord,
+        Coord,
+        ArtifactCoords,
+        Rect,
+        Vec<Coord>,
+        Vec<Coord>,
+    ) {
         let dungeon_size = Size::new(30, 30);
         let corridor_offset_x = 0;
         let corridor_offset_y = 10;
@@ -327,7 +455,13 @@ impl Map1 {
         .to_coord()
         .unwrap();
         let hub_top_left = hub_centre - hub_size.to_coord().unwrap() / 2;
-        let full_map = 'outer: loop {
+        let hub_rect = Rect {
+            min: coord_to_vec(hub_top_left),
+            max: coord_to_vec(hub_top_left + hub_size),
+        };
+        let (full_map, artifact_coords, item_candidates, enemy_candidates) = 'outer: loop {
+            let mut item_candidates: Vec<Coord> = Vec::new();
+            let mut enemy_candidates: Vec<Coord> = Vec::new();
             let dungeons = (0..3)
                 .map(|_| {
                     let mut map = Self::new_with_size(dungeon_size);
@@ -339,21 +473,34 @@ impl Map1 {
             for c in hub_size.coord_iter_row_major() {
                 *full_map.grid.get_checked_mut(c + hub_top_left) = false;
             }
-            full_map.carve_out_open_space_from(
-                &dungeons[0],
+            let dungeon_offsets = [
                 Coord::new(0, dungeon_size.height() as i32),
-            );
-            full_map.carve_out_open_space_from(
-                &dungeons[2],
+                Coord::new((total_size.width() - dungeon_size.width()) as i32 / 2, 0),
                 Coord::new(
                     (total_size.width() - dungeon_size.width()) as i32,
                     dungeon_size.height() as i32,
                 ),
+            ];
+            full_map.carve_out_open_space_from(&dungeons[0], dungeon_offsets[0]);
+            full_map.carve_out_open_space_from(&dungeons[2], dungeon_offsets[2]);
+            full_map.carve_out_open_space_from(&dungeons[1], dungeon_offsets[1]);
+            let artifact_coords = ArtifactCoords(
+                dungeons[0].left_most_candidate(rng) + dungeon_offsets[0],
+                dungeons[1].top_most_candidate(rng) + dungeon_offsets[1],
+                dungeons[2].right_most_candidate(rng) + dungeon_offsets[2],
             );
-            full_map.carve_out_open_space_from(
-                &dungeons[1],
-                Coord::new((total_size.width() - dungeon_size.width()) as i32 / 2, 0),
-            );
+            let mut update_cardidates = |i: usize| {
+                let all_candidates = dungeons[i]
+                    .item_and_object_candidates()
+                    .map(|c| c + dungeon_offsets[i])
+                    .collect::<Vec<_>>();
+                let (l, r) = all_candidates.split_at(all_candidates.len() / 2);
+                item_candidates.extend(l);
+                enemy_candidates.extend(r);
+            };
+            update_cardidates(0);
+            update_cardidates(1);
+            update_cardidates(2);
             let mut corridor_cursor = hub_centre - Coord::new(hub_size.width() as i32 / 2 + 1, 1);
             loop {
                 match full_map.grid.get_mut(corridor_cursor) {
@@ -406,7 +553,7 @@ impl Map1 {
                 }
             }
             let mut corridor_cursor = hub_centre + Coord::new(0, hub_size.height() as i32 / 2 - 1);
-            for _ in 0..40 {
+            for _ in 0..16 {
                 match full_map.grid.get_mut(corridor_cursor) {
                     None => (),
                     Some(b) => {
@@ -418,10 +565,18 @@ impl Map1 {
                 }
                 corridor_cursor += Coord::new(0, 1);
             }
-            break full_map;
+            break (full_map, artifact_coords, item_candidates, enemy_candidates);
         };
         let end_corridor_entrance = hub_centre + Coord::new(0, hub_size.height() as i32 / 2 - 1);
-        (full_map, hub_centre, end_corridor_entrance)
+        (
+            full_map,
+            hub_centre,
+            end_corridor_entrance,
+            artifact_coords,
+            hub_rect,
+            item_candidates,
+            enemy_candidates,
+        )
     }
 
     pub fn to_map2(&self) -> Map2 {
@@ -450,14 +605,7 @@ impl Map1 {
     }
 }
 
+#[derive(Default)]
 pub struct Map2 {
     pub wall_strips: Vec<Vec<Vec2>>,
-}
-
-impl Map2 {
-    pub fn new() -> Self {
-        Self {
-            wall_strips: Vec::new(),
-        }
-    }
 }

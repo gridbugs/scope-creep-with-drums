@@ -416,6 +416,7 @@ fn sig(
     player_damage: FrameSig<FrameSigVar<bool>>,
     door_opening: FrameSig<FrameSigVar<bool>>,
     win: FrameSig<FrameSigVar<bool>>,
+    good: FrameSig<FrameSigVar<bool>>,
 ) -> StereoPair<SigBoxed<f32>> {
     let get_nth_object = {
         let scene = scene.clone();
@@ -507,8 +508,10 @@ fn sig(
             .build()
             + 0.0001)
             .map(|x| x.min(1.));
-        let damage_env = adsr_linear_01(player_damage.clone()).release_s(1.0).build();
-        let death_noise_env = adsr_linear_01(player_alive.clone().map(|b| !b))
+        let damage_env = adsr_linear_01(Sig(player_damage.clone()))
+            .release_s(1.0)
+            .build();
+        let death_noise_env = adsr_linear_01(Sig(player_alive.clone().map(|b| !b)))
             .attack_s(2.)
             .build();
         // XXX the gate_to_trig_rising_edge should not be necessary but is due to a bug in caw
@@ -516,8 +519,17 @@ fn sig(
             Sig(periodic_trig_s(0.05).build()).gate_to_trig_rising_edge(),
         )) * adsr_linear_01(door_opening.clone()).build()
             * 0.01;
+        let good_env = adsr_linear_01(Sig(good.clone()).gate_to_trig_rising_edge())
+            .release_s(1.)
+            .build();
+        let good_sig = oscillator(Sine, 20.0)
+            .reset_offset_01(channel.circle_phase_offset_01())
+            .build()
+            * good_env
+            * 0.05;
         (((((world + objects) * post_scale)
             + door_opening_shake
+            + good_sig
             + (noise::brown() * ghost_noise_level)
             + (noise::brown() * damage_env * 0.05)
             + (noise::brown() * death_noise_env * 4.))
@@ -537,6 +549,7 @@ struct AudioState {
     player_damage: FrameSig<FrameSigVar<bool>>,
     door_opening: FrameSig<FrameSigVar<bool>>,
     win: FrameSig<FrameSigVar<bool>>,
+    good: FrameSig<FrameSigVar<bool>>,
 }
 
 impl AudioState {
@@ -547,6 +560,7 @@ impl AudioState {
         player_damage: FrameSig<FrameSigVar<bool>>,
         door_opening: FrameSig<FrameSigVar<bool>>,
         win: FrameSig<FrameSigVar<bool>>,
+        good: FrameSig<FrameSigVar<bool>>,
     ) -> Self {
         let player = Player::new()
             .unwrap()
@@ -558,6 +572,7 @@ impl AudioState {
                     player_damage.clone(),
                     door_opening.clone(),
                     win.clone(),
+                    good.clone(),
                 ),
                 ConfigOwned {
                     system_latency_s: 0.0167,
@@ -573,6 +588,7 @@ impl AudioState {
             player_damage,
             door_opening,
             win,
+            good,
         }
     }
 
@@ -610,6 +626,7 @@ fn setup_caw_player(world: &mut World) {
     let player_damage = frame_sig_var(true);
     let door_opening = frame_sig_var(true);
     let win = frame_sig_var(true);
+    let good = frame_sig_var(true);
     world.insert_non_send_resource(AudioState::new(
         rendered_scene,
         dist_to_nearest_ghost,
@@ -617,6 +634,7 @@ fn setup_caw_player(world: &mut World) {
         player_damage,
         door_opening,
         win,
+        good,
     ));
     world.insert_resource(ScopeState::new());
 }
@@ -883,7 +901,7 @@ struct RenderedScene {
     text: Vec<Vec2>,
 }
 
-#[derive(Resource)]
+#[derive(Resource, Default)]
 struct State {
     map1: Map1,
     map2: Map2,
@@ -898,6 +916,11 @@ struct State {
     door_open_amount: f32,
     time_spent_near_end: f32,
     restart_countdown: Option<u64>,
+    num_artifacts_collected: usize,
+    hub_rect: Rect,
+    item_candidates: Vec<Vec2>,
+    enemy_candidates: Vec<Vec2>,
+    pickup_countdown: f32,
 }
 
 fn all_walls(map: &Map2, end_doors: &[Vec<Vec2>; 2]) -> Vec<Seg2> {
@@ -961,26 +984,6 @@ fn move_object_with_wall_collision_detection(
 }
 
 impl State {
-    fn new() -> Self {
-        let map1 = Map1::new();
-        let map2 = Map2::new();
-        Self {
-            map1,
-            map2,
-            player: PlayerCharacter::default(),
-            objects: Vec::new(),
-            paused: true,
-            show_map: false,
-            seen_walls: HashSet::new(),
-            frame_count: 0,
-            end_doors: Default::default(),
-            doors_opening: false,
-            door_open_amount: 0.0,
-            time_spent_near_end: 0.0,
-            restart_countdown: None,
-        }
-    }
-
     fn player_walk(&mut self, by: Vec2) {
         // Use right90 here so that (0, 1) represents forward, (1, 0) represents right, etc.
         let delta = self.player.right90().rotate(by) * 0.05;
@@ -1003,24 +1006,51 @@ impl State {
         self.player.position = position;
     }
 
+    fn all_enemy_positions(&self) -> impl Iterator<Item = Vec2> {
+        self.objects.iter().filter_map(|x| match x.typ {
+            ObjectType::Ghost | ObjectType::Slug => Some(x.position),
+            _ => None,
+        })
+    }
+
     fn enemies_walk(&mut self) {
-        for o in &mut self.objects {
+        if self.is_player_in_hub() {
+            return;
+        }
+        let all_enemy_positions = self.all_enemy_positions().collect::<Vec<_>>();
+        let mut moves = Vec::new();
+        'outer: for (i, o) in self.objects.iter().enumerate() {
+            if self.player.position.distance(o.position) > 20. {
+                continue;
+            }
             match o.typ {
                 ObjectType::Ghost => {
                     if let Some(walk_delta) = (self.player.position - o.position).try_normalize() {
                         let walk_delta = walk_delta * 0.01;
-                        o.position += walk_delta;
+                        let new_position = o.position + walk_delta;
+                        for p in &all_enemy_positions {
+                            if *p != o.position && new_position.distance(*p) < OBJECT_RADIUS * 2. {
+                                continue 'outer;
+                            }
+                        }
+                        moves.push((i, new_position));
                     }
                 }
                 ObjectType::Slug => {
                     if let Some(walk_delta) = (self.player.position - o.position).try_normalize() {
                         let walk_delta = walk_delta * 0.02;
-                        o.position = move_object_with_wall_collision_detection(
+                        let new_position = move_object_with_wall_collision_detection(
                             o.position,
                             walk_delta,
                             &self.map2,
                             &self.end_doors,
                         );
+                        for p in &all_enemy_positions {
+                            if *p != o.position && new_position.distance(*p) < OBJECT_RADIUS * 2. {
+                                continue 'outer;
+                            }
+                        }
+                        moves.push((i, new_position));
                     }
                 }
                 ObjectType::Artifact1
@@ -1031,6 +1061,9 @@ impl State {
                 | ObjectType::Exit
                 | ObjectType::Mana => (),
             }
+        }
+        for (i, p) in moves {
+            self.objects[i].position = p;
         }
     }
 
@@ -1047,6 +1080,17 @@ impl State {
         min_dist
     }
 
+    fn collect_artifact(&mut self) {
+        if self.num_artifacts_collected == 0 {
+            self.spawn_enemies(ObjectType::Ghost, 30);
+        }
+        self.num_artifacts_collected += 1;
+    }
+
+    fn is_player_in_hub(&self) -> bool {
+        self.hub_rect.contains(self.player.position)
+    }
+
     fn reset(&mut self) {
         let mut seed_rng = rand::rng();
         let seed = seed_rng.random();
@@ -1058,7 +1102,14 @@ impl State {
             end_doors,
             end_doors_mid_point,
             exit_point,
+            artifact_coords,
+            hub_rect,
+            item_candidates,
+            enemy_candidates,
         } = FullMap::make(&mut rng);
+        self.item_candidates = item_candidates;
+        self.enemy_candidates = enemy_candidates;
+        self.hub_rect = hub_rect;
         self.end_doors = end_doors;
         self.door_open_amount = -0.5;
         self.map1 = map1;
@@ -1066,6 +1117,7 @@ impl State {
         self.doors_opening = false;
         self.time_spent_near_end = 0.0;
         self.restart_countdown = None;
+        self.num_artifacts_collected = 0;
         let position = Vec2::new(32.60643, 41.605396);
         let facing_rad = 0.7207975;
         self.player = PlayerCharacter {
@@ -1076,6 +1128,7 @@ impl State {
             mana: Meter { current: 2, max: 2 },
             iframes: 0,
         };
+        self.pickup_countdown = 0.;
         self.objects = vec![
             Object {
                 typ: ObjectType::EndDoorLabel,
@@ -1087,24 +1140,50 @@ impl State {
                 position: exit_point,
                 radius: 0.5,
             },
-            /*
-            Object {
-                typ: ObjectType::Slug,
-                position: self.player.position + Vec2::new(0., 0.),
-                radius: 0.5,
-            },
             Object {
                 typ: ObjectType::Artifact3,
-                position: self.player.position + Vec2::new(0., 3.),
+                position: coord_to_vec(artifact_coords.0),
                 radius: 0.5,
             },
             Object {
-                typ: ObjectType::Ghost,
-                position: self.player.position + Vec2::new(-10., 3.),
+                typ: ObjectType::Artifact2,
+                position: coord_to_vec(artifact_coords.1),
                 radius: 0.5,
-            }, */
+            },
+            Object {
+                typ: ObjectType::Artifact1,
+                position: coord_to_vec(artifact_coords.2),
+                radius: 0.5,
+            },
         ];
+        self.spawn_enemies(ObjectType::Slug, 30);
+        self.spawn_items(ObjectType::Health, 10);
+        self.spawn_items(ObjectType::Mana, 10);
         log::info!("Generated map!");
+    }
+
+    fn spawn_enemies(&mut self, typ: ObjectType, quantity: usize) {
+        for _ in 0..quantity {
+            if let Some(position) = self.enemy_candidates.pop() {
+                self.objects.push(Object {
+                    typ,
+                    position,
+                    radius: 0.5,
+                });
+            }
+        }
+    }
+
+    fn spawn_items(&mut self, typ: ObjectType, quantity: usize) {
+        for _ in 0..quantity {
+            if let Some(position) = self.item_candidates.pop() {
+                self.objects.push(Object {
+                    typ,
+                    position,
+                    radius: 0.5,
+                });
+            }
+        }
     }
 
     fn all_walls(&self) -> Vec<Seg2> {
@@ -1385,13 +1464,17 @@ impl State {
             let right = screen_space_project(object.screen_space_seg.end);
             let mid = screen_space_project(object.screen_space_position);
             if left.x > -DISPLAY_WIDTH / 2. && right.x < DISPLAY_WIDTH / 2. {
-                rendered_objects.push(RenderedObject {
+                let o = RenderedObject {
                     typ: object.typ,
                     left: left.x,
                     right: right.x,
                     mid: mid.x,
                     height: left.y,
-                });
+                };
+                // not sure how this can't be the case but it does seem to happen
+                if o.right <= o.left {
+                    rendered_objects.push(o);
+                }
             }
         }
         RenderedScene {
@@ -1464,10 +1547,13 @@ impl State {
     fn passive_update(&mut self, audio_state: &mut AudioState) {
         let mut damage_this_frame = false;
         let mut to_remove = Vec::new();
+        let mut collected_artifacts = Vec::new();
         for (i, o) in self.objects.iter().enumerate() {
             match o.typ {
                 ObjectType::Ghost | ObjectType::Slug => {
-                    if o.position.distance(self.player.position) < OBJECT_RADIUS * 2. {
+                    if o.position.distance(self.player.position) < OBJECT_RADIUS * 2.
+                        && self.player.alive
+                    {
                         self.player.take_damage();
                         damage_this_frame = true;
                         if self.player.health.is_zero() && self.restart_countdown.is_none() {
@@ -1479,6 +1565,7 @@ impl State {
                     if o.position.distance(self.player.position) < OBJECT_RADIUS * 2.
                         && !self.player.health.is_max()
                     {
+                        self.pickup_countdown = 1.0;
                         self.player.health.incr();
                         to_remove.push(i);
                     }
@@ -1487,6 +1574,7 @@ impl State {
                     if o.position.distance(self.player.position) < OBJECT_RADIUS * 2.
                         && !self.player.mana.is_max()
                     {
+                        self.pickup_countdown = 1.0;
                         self.player.mana.incr();
                         to_remove.push(i);
                     }
@@ -1496,17 +1584,25 @@ impl State {
                         self.time_spent_near_end += 1.0;
                     }
                 }
-                ObjectType::Artifact1
-                | ObjectType::Artifact2
-                | ObjectType::Artifact3
-                | ObjectType::EndDoorLabel => (),
+                ObjectType::Artifact1 | ObjectType::Artifact2 | ObjectType::Artifact3 => {
+                    if o.position.distance(self.player.position) < OBJECT_RADIUS * 2. {
+                        collected_artifacts.push(i);
+                    }
+                }
+                ObjectType::EndDoorLabel => (),
             }
         }
         for i in to_remove {
             self.objects.swap_remove(i);
         }
+        for i in collected_artifacts {
+            self.objects.swap_remove(i);
+            self.collect_artifact();
+            self.pickup_countdown = 1.0;
+        }
         audio_state.player_damage.0.set(damage_this_frame);
         audio_state.door_opening.0.set(self.doors_opening);
+        audio_state.good.0.set(self.pickup_countdown > 0.);
         if self.time_spent_near_end > 120.0 {
             audio_state.win.0.set(true);
             if self.restart_countdown.is_none() {
@@ -1515,6 +1611,7 @@ impl State {
         } else {
             audio_state.win.0.set(false);
         }
+        self.pickup_countdown -= 0.1;
     }
 
     fn start_opening_doors(&mut self) {
@@ -1550,7 +1647,7 @@ impl State {
 }
 
 fn setup_state(world: &mut World) {
-    let mut state = State::new();
+    let mut state = State::default();
     state.reset();
     world.insert_resource(state);
 }
@@ -1753,12 +1850,19 @@ fn debug_render_map2_3d(state: Res<State>, mut gizmos: Gizmos) {
 }
 
 #[allow(unused)]
-fn debug_update(mut state: ResMut<State>, keys: Res<ButtonInput<KeyCode>>) {
+fn debug_update(
+    mut state: ResMut<State>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut audio_state: NonSendMut<AudioState>,
+) {
     if keys.just_pressed(KeyCode::KeyP) {
         state.paused = !state.paused;
     }
     if keys.just_pressed(KeyCode::KeyO) {
         state.start_opening_doors();
+    }
+    if keys.just_pressed(KeyCode::KeyG) {
+        audio_state.good.0.set(true);
     }
 }
 
@@ -1863,13 +1967,13 @@ fn main() {
                 //debug_render_map2,
                 //debug_render_map2_pruned,
                 //debug_render_map2_3d,
-                debug_update,
-                caw_tick,
+                //debug_update,
                 grab_mouse,
                 input_update,
                 enemy_update,
                 passives_update,
                 update_general,
+                caw_tick,
                 render_scope,
             ),
         )
