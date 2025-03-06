@@ -921,6 +921,7 @@ struct State {
     item_candidates: Vec<Vec2>,
     enemy_candidates: Vec<Vec2>,
     pickup_countdown: f32,
+    time_spent_in_hub: f32,
 }
 
 fn all_walls(map: &Map2, end_doors: &[Vec<Vec2>; 2]) -> Vec<Seg2> {
@@ -1107,6 +1108,7 @@ impl State {
             item_candidates,
             enemy_candidates,
         } = FullMap::make(&mut rng);
+        self.time_spent_in_hub = 0.;
         self.item_candidates = item_candidates;
         self.enemy_candidates = enemy_candidates;
         self.hub_rect = hub_rect;
@@ -1157,8 +1159,8 @@ impl State {
             },
         ];
         self.spawn_enemies(ObjectType::Slug, 30);
-        self.spawn_items(ObjectType::Health, 10);
-        self.spawn_items(ObjectType::Mana, 10);
+        self.spawn_items(ObjectType::Health, 8);
+        self.spawn_items(ObjectType::Mana, 8);
         log::info!("Generated map!");
     }
 
@@ -1612,6 +1614,18 @@ impl State {
             audio_state.win.0.set(false);
         }
         self.pickup_countdown -= 0.1;
+        if self.is_player_in_hub() {
+            self.time_spent_in_hub += 1.;
+        } else {
+            self.time_spent_in_hub = 0.;
+        }
+        if self.time_spent_in_hub >= 120.
+            && self.door_open_amount < 1.
+            && !self.doors_opening
+            && self.num_artifacts_collected == 3
+        {
+            self.start_opening_doors();
+        }
     }
 
     fn start_opening_doors(&mut self) {
@@ -1896,7 +1910,7 @@ fn input_update(
         delta = delta.normalize();
     }
     if sprint {
-        delta *= 2.;
+        //delta *= 2.;
     }
     state.player_walk(delta);
 }
