@@ -284,42 +284,48 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> ObjectRenderer<O> {
     fn sample_slug(&mut self, object: &RenderedObject, ctx: &SigCtx) {
         let offset = Vec2::new(object.mid, object.height * -1.);
         for i in 0..ctx.num_samples {
-            let delta = match (i / 8) % 3 {
-                1 => {
-                    let random_x = self.rng.random::<f32>() * 0.9;
-                    let random_y = self.rng.random::<f32>() * 0.5;
+            let num_reps = 16;
+            let delta = match (i / num_reps) % 4 {
+                j @ (0 | 2) => {
+                    let (mul_x, mul_y, offset_x, offset_y) =
+                        if (i % num_reps == 0) || (i % num_reps) == num_reps - 1 {
+                            let left = (j == 0 && i % num_reps == 0)
+                                || (j == 2 && i % num_reps == num_reps - 1);
+                            let offset_x = if left { -0.2 } else { 0.2 };
+                            (0.01, 0.1, offset_x, 0.1)
+                        } else {
+                            (0.9, 0.5, 0.0, 0.0)
+                        };
+                    let random_x = self.rng.random::<f32>() * mul_x;
+                    let random_y = self.rng.random::<f32>() * mul_y;
                     let speed = 100.;
                     let dx = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).cos()
-                        * random_x;
+                        * random_x
+                        + offset_x;
                     let mut dy = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz)
                         .sin()
-                        * random_y;
+                        * random_y
+                        + offset_y;
                     dy = dy.abs();
                     Vec2::new(dx, dy)
                 }
-                0 => {
+                j @ (1 | 3) => {
+                    let scale = if (i % num_reps == 0) || (i % num_reps) == num_reps - 1 {
+                        0.01
+                    } else {
+                        0.1
+                    };
                     let random_x = self.rng.random::<f32>() * 2. - 1.;
                     let random_y = self.rng.random::<f32>() * 2. - 1.;
                     let speed = 100.;
                     let dx = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).cos()
-                        * 0.2
+                        * scale
                         + random_x * 0.05;
                     let dy = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).sin()
-                        * 0.2
+                        * scale
                         + random_y * 0.05;
-                    Vec2::new(dx, dy) + Vec2::new(0.5, 0.8)
-                }
-                2 => {
-                    let random_x = self.rng.random::<f32>() * 2. - 1.;
-                    let random_y = self.rng.random::<f32>() * 2. - 1.;
-                    let speed = 100.;
-                    let dx = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).cos()
-                        * 0.2
-                        + random_x * 0.05;
-                    let dy = ((speed * 60. * self.sample_index as f32) / ctx.sample_rate_hz).sin()
-                        * 0.2
-                        + random_y * 0.05;
-                    Vec2::new(dx, dy) + Vec2::new(-0.5, 0.8)
+                    let offset_x = if j == 1 { 0.5 } else { -0.5 };
+                    Vec2::new(dx, dy) + Vec2::new(offset_x, 0.8)
                 }
                 _ => unreachable!(),
             };
@@ -1124,6 +1130,8 @@ impl State {
         self.seen_walls.clear();
         let position = Vec2::new(32.60643, 41.605396);
         let facing_rad = 0.7207975;
+        let facing_rad = 0.;
+        self.paused = true;
         self.player = PlayerCharacter {
             position,
             facing_rad,
@@ -1133,6 +1141,11 @@ impl State {
         };
         self.pickup_countdown = 0.;
         self.objects = vec![
+            Object {
+                typ: ObjectType::Slug,
+                position: position + Vec2::new(2.0, 0.0),
+                radius: 2.0,
+            },
             Object {
                 typ: ObjectType::EndDoorLabel,
                 position: end_doors_mid_point + Vec2::new(0.0, -1.),
