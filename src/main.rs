@@ -129,7 +129,7 @@ impl SigT for SceneTracer {
 }
 
 lazy_static! {
-    static ref ARTIFACT_1_LABEL: Vec<Vec2> = render_text("ARTIFACT OF ORDER", Vec2::ZERO, 2, 0.8);
+    static ref ARTIFACT_1_LABEL: Vec<Vec2> = render_text("ORB OF ORDER", Vec2::ZERO, 2, 0.8);
     static ref ARTIFACT_1_LABEL_WIDTH: f32 = {
         ARTIFACT_1_LABEL
             .iter()
@@ -137,7 +137,7 @@ lazy_static! {
             .max_by(|a, b| a.total_cmp(b))
             .unwrap()
     };
-    static ref ARTIFACT_2_LABEL: Vec<Vec2> = render_text("ARTIFACT OF HARMONY", Vec2::ZERO, 2, 0.8);
+    static ref ARTIFACT_2_LABEL: Vec<Vec2> = render_text("ORB OF HARMONY", Vec2::ZERO, 2, 0.8);
     static ref ARTIFACT_2_LABEL_WIDTH: f32 = {
         ARTIFACT_2_LABEL
             .iter()
@@ -145,7 +145,7 @@ lazy_static! {
             .max_by(|a, b| a.total_cmp(b))
             .unwrap()
     };
-    static ref ARTIFACT_3_LABEL: Vec<Vec2> = render_text("ARTIFACT OF CHAOS", Vec2::ZERO, 2, 0.8);
+    static ref ARTIFACT_3_LABEL: Vec<Vec2> = render_text("ORB OF CHAOS", Vec2::ZERO, 2, 0.8);
     static ref ARTIFACT_3_LABEL_WIDTH: f32 = {
         ARTIFACT_3_LABEL
             .iter()
@@ -154,7 +154,7 @@ lazy_static! {
             .unwrap()
     };
     static ref END_DOORS_LABEL: Vec<Vec2> = render_text(
-        "THESE DOORS WILL OPEN WHEN THE 3 ARTIFACTS HAVE BEEN RETURNED",
+        "THESE DOORS WILL OPEN WHEN THE THREE ORBS HAVE BEEN RETURNED",
         Vec2::ZERO,
         1,
         0.8
@@ -281,6 +281,44 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> ObjectRenderer<O> {
         }
     }
 
+    fn sample_weeping_angel(&mut self, object: &RenderedObject, ctx: &SigCtx) {
+        let offset = Vec2::new(object.mid, object.height * 1.4);
+        let head_size = 0.25;
+        let body_base = -2.2;
+        let wing_offset_y = -0.5;
+        for i in 0..ctx.num_samples {
+            let num_reps = 2;
+            let v = match (i / num_reps) % 7 {
+                0 => {
+                    let angle = self.rng.random::<f32>() * f32::consts::PI * 2.0;
+                    let dist = self.rng.random::<f32>() * head_size;
+                    Vec2::new(angle.cos() * dist, angle.sin() * dist) * 2.
+                }
+                1 => Vec2::new(
+                    (self.rng.random::<f32>() * 2.0 - 1.) * 1.0,
+                    body_base + (self.rng.random::<f32>() * 2.0 - 1.0) * 1.0,
+                ),
+                2 | 4 | 6 => {
+                    let angle = self.rng.random::<f32>() * f32::consts::PI * 2.0;
+                    let dist = self.rng.random::<f32>() * 0.2;
+                    Vec2::new(angle.cos() * dist, angle.sin() * dist)
+                        + Vec2::new(0.0, wing_offset_y)
+                }
+                j @ (3 | 5) => {
+                    let offset_x = if j == 3 { -1.0 } else { 1.0 } * 2.0;
+                    Vec2::new(
+                        offset_x + (self.rng.random::<f32>() * 2.0 - 1.) * 0.3,
+                        wing_offset_y - 0.5 + (self.rng.random::<f32>() * 2.0 - 1.) * 0.3,
+                    )
+                }
+                _ => unreachable!(),
+            };
+            let mut v = v * object.height + offset;
+            v.x = v.x.clamp(object.right, object.left);
+            self.buf.push(v);
+        }
+    }
+
     fn sample_slug(&mut self, object: &RenderedObject, ctx: &SigCtx) {
         let offset = Vec2::new(object.mid, object.height * -1.);
         for i in 0..ctx.num_samples {
@@ -392,6 +430,7 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
                 ObjectType::Artifact3 => self.sample_artifact3(&object, ctx),
                 ObjectType::Ghost => self.sample_ghost(&object, ctx),
                 ObjectType::Slug => self.sample_slug(&object, ctx),
+                ObjectType::WeepingAngel => self.sample_weeping_angel(&object, ctx),
                 ObjectType::Health => self.sample_health(&object, ctx),
                 ObjectType::EndDoorLabel => self.sample_end_doors_label(&object, ctx),
                 ObjectType::Exit => self.sample_exit(&object, ctx),
@@ -849,14 +888,36 @@ enum ObjectType {
     Artifact3,
     Ghost,
     Slug,
+    WeepingAngel,
     Health,
+}
+
+impl ObjectType {
+    fn radius(&self) -> f32 {
+        match self {
+            Self::EndDoorLabel => 2.,
+            Self::Exit => 0.5,
+            Self::Artifact1 => 0.5,
+            Self::Artifact2 => 0.5,
+            Self::Artifact3 => 0.5,
+            Self::Ghost => 0.5,
+            Self::Slug => 0.5,
+            Self::WeepingAngel => 1.5,
+            Self::Health => 0.5,
+        }
+    }
+    fn player_collide_radius(&self) -> f32 {
+        match self {
+            Self::WeepingAngel => 0.5,
+            _ => self.radius(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 struct Object {
     typ: ObjectType,
     position: Vec2,
-    radius: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -966,10 +1027,9 @@ fn all_walls_with_visible_corner(
     })
 }
 
-const OBJECT_RADIUS: f32 = 0.25;
-
 fn move_object_with_wall_collision_detection(
     mut position: Vec2,
+    radius: f32,
     delta: Vec2,
     map: &Map2,
     end_doors: &[Vec<Vec2>; 2],
@@ -981,7 +1041,7 @@ fn move_object_with_wall_collision_detection(
         for w in all_walls(map, end_doors) {
             if w.grow(-0.01).overlaps_with_circle(&Circle {
                 centre: test_position,
-                radius: OBJECT_RADIUS,
+                radius,
             }) {
                 step = step.project_onto(w.delta());
                 continue 'outer;
@@ -991,6 +1051,8 @@ fn move_object_with_wall_collision_detection(
     }
     position
 }
+
+const PLAYER_RADIUS: f32 = 0.25;
 
 impl State {
     fn player_walk(&mut self, by: Vec2) {
@@ -1004,7 +1066,7 @@ impl State {
             for w in self.all_walls() {
                 if w.grow(-0.01).overlaps_with_circle(&Circle {
                     centre: test_position,
-                    radius: OBJECT_RADIUS,
+                    radius: PLAYER_RADIUS,
                 }) {
                     step = step.project_onto(w.delta());
                     continue 'outer;
@@ -1017,7 +1079,7 @@ impl State {
 
     fn all_enemy_positions(&self) -> impl Iterator<Item = Vec2> {
         self.objects.iter().filter_map(|x| match x.typ {
-            ObjectType::Ghost | ObjectType::Slug => Some(x.position),
+            ObjectType::Ghost | ObjectType::Slug | ObjectType::WeepingAngel => Some(x.position),
             _ => None,
         })
     }
@@ -1037,11 +1099,6 @@ impl State {
                     if let Some(walk_delta) = (self.player.position - o.position).try_normalize() {
                         let walk_delta = walk_delta * 0.01;
                         let new_position = o.position + walk_delta;
-                        for p in &all_enemy_positions {
-                            if *p != o.position && new_position.distance(*p) < OBJECT_RADIUS * 2. {
-                                continue 'outer;
-                            }
-                        }
                         moves.push((i, new_position));
                     }
                 }
@@ -1050,16 +1107,41 @@ impl State {
                         let walk_delta = walk_delta * 0.02;
                         let new_position = move_object_with_wall_collision_detection(
                             o.position,
+                            o.typ.radius(),
                             walk_delta,
                             &self.map2,
                             &self.end_doors,
                         );
                         for p in &all_enemy_positions {
-                            if *p != o.position && new_position.distance(*p) < OBJECT_RADIUS * 2. {
+                            if *p != o.position && new_position.distance(*p) < o.typ.radius() {
                                 continue 'outer;
                             }
                         }
                         moves.push((i, new_position));
+                    }
+                }
+                ObjectType::WeepingAngel => {
+                    if let Some(angle_from_player) =
+                        (o.position - self.player.position).try_normalize()
+                    {
+                        // weeping angel moves faster when you're not looking
+                        let movement_scale = 1.0
+                            - (self.player.facing_vec2_normalized().dot(angle_from_player) - 0.7)
+                                .max(0.0)
+                                / 0.3;
+                        if let Some(walk_delta) =
+                            (self.player.position - o.position).try_normalize()
+                        {
+                            let walk_delta = walk_delta * 0.05 * movement_scale;
+                            let new_position = move_object_with_wall_collision_detection(
+                                o.position,
+                                o.typ.radius(),
+                                walk_delta,
+                                &self.map2,
+                                &self.end_doors,
+                            );
+                            moves.push((i, new_position));
+                        }
                     }
                 }
                 ObjectType::Artifact1
@@ -1090,7 +1172,10 @@ impl State {
 
     fn collect_artifact(&mut self) {
         if self.num_artifacts_collected == 0 {
-            self.spawn_enemies(ObjectType::Ghost, 30);
+            self.spawn_enemies(ObjectType::Ghost, 20);
+        }
+        if self.num_artifacts_collected == 1 {
+            self.spawn_enemies(ObjectType::WeepingAngel, 10);
         }
         self.num_artifacts_collected += 1;
     }
@@ -1130,8 +1215,8 @@ impl State {
         self.seen_walls.clear();
         let position = Vec2::new(32.60643, 41.605396);
         let facing_rad = 0.7207975;
-        let facing_rad = 0.;
-        self.paused = true;
+        //let facing_rad = -90f32.to_radians();
+        self.paused = false;
         self.player = PlayerCharacter {
             position,
             facing_rad,
@@ -1141,35 +1226,29 @@ impl State {
         };
         self.pickup_countdown = 0.;
         self.objects = vec![
-            Object {
-                typ: ObjectType::Slug,
-                position: position + Vec2::new(2.0, 0.0),
-                radius: 2.0,
-            },
+            //Object {
+            //    typ: ObjectType::WeepingAngel,
+            //    position: position + Vec2::new(0.0, -2.0),
+            //},
             Object {
                 typ: ObjectType::EndDoorLabel,
                 position: end_doors_mid_point + Vec2::new(0.0, -1.),
-                radius: 2.0,
             },
             Object {
                 typ: ObjectType::Exit,
                 position: exit_point,
-                radius: 0.5,
             },
             Object {
                 typ: ObjectType::Artifact3,
                 position: coord_to_vec(artifact_coords.0),
-                radius: 0.5,
             },
             Object {
                 typ: ObjectType::Artifact2,
                 position: coord_to_vec(artifact_coords.1),
-                radius: 0.5,
             },
             Object {
                 typ: ObjectType::Artifact1,
                 position: coord_to_vec(artifact_coords.2),
-                radius: 0.5,
             },
         ];
         self.spawn_enemies(ObjectType::Slug, 30);
@@ -1180,11 +1259,7 @@ impl State {
     fn spawn_enemies(&mut self, typ: ObjectType, quantity: usize) {
         for _ in 0..quantity {
             if let Some(position) = self.enemy_candidates.pop() {
-                self.objects.push(Object {
-                    typ,
-                    position,
-                    radius: 0.5,
-                });
+                self.objects.push(Object { typ, position });
             }
         }
     }
@@ -1192,11 +1267,7 @@ impl State {
     fn spawn_items(&mut self, typ: ObjectType, quantity: usize) {
         for _ in 0..quantity {
             if let Some(position) = self.item_candidates.pop() {
-                self.objects.push(Object {
-                    typ,
-                    position,
-                    radius: 0.5,
-                });
+                self.objects.push(Object { typ, position });
             }
         }
     }
@@ -1321,7 +1392,7 @@ impl State {
             .objects
             .iter()
             .filter_map(|o| {
-                let to_edge = self.player.right90() * o.radius;
+                let to_edge = self.player.right90() * o.typ.radius();
                 let screen_space_position = self.player.transform_abs_vec2_to_rel(o.position);
                 let screen_space_seg = Seg2 {
                     start: self.player.transform_abs_vec2_to_rel(o.position + to_edge),
@@ -1390,7 +1461,7 @@ impl State {
                 // entire object is visible.
                 let v = Seg2::new(Vec2::ZERO, o.screen_space_seg.start);
                 for wall in &all_walls {
-                    if v.intersect(&wall.grow(eps)).is_some() {
+                    if let Some(_ict) = v.intersect(&wall.grow(eps)) {
                         return false;
                     }
                 }
@@ -1548,8 +1619,8 @@ impl State {
         let mut collected_artifacts = Vec::new();
         for (i, o) in self.objects.iter().enumerate() {
             match o.typ {
-                ObjectType::Ghost | ObjectType::Slug => {
-                    if o.position.distance(self.player.position) < OBJECT_RADIUS * 2.
+                ObjectType::Ghost | ObjectType::Slug | ObjectType::WeepingAngel => {
+                    if o.position.distance(self.player.position) < o.typ.player_collide_radius()
                         && self.player.alive
                     {
                         self.player.take_damage();
@@ -1560,7 +1631,7 @@ impl State {
                     }
                 }
                 ObjectType::Health => {
-                    if o.position.distance(self.player.position) < OBJECT_RADIUS * 2.
+                    if o.position.distance(self.player.position) < o.typ.radius()
                         && !self.player.health.is_max()
                     {
                         self.pickup_countdown = 1.0;
@@ -1569,12 +1640,12 @@ impl State {
                     }
                 }
                 ObjectType::Exit => {
-                    if o.position.distance(self.player.position) < OBJECT_RADIUS * 4. {
+                    if o.position.distance(self.player.position) < o.typ.radius() * 2. {
                         self.time_spent_near_end += 1.0;
                     }
                 }
                 ObjectType::Artifact1 | ObjectType::Artifact2 | ObjectType::Artifact3 => {
-                    if o.position.distance(self.player.position) < OBJECT_RADIUS * 2. {
+                    if o.position.distance(self.player.position) < o.typ.radius() {
                         collected_artifacts.push(i);
                     }
                 }
@@ -1685,7 +1756,7 @@ fn debug_render_map1(state: Res<State>, mut gizmos: Gizmos) {
     for object in &state.objects {
         gizmos.circle_2d(
             object.position * cell_size.x + offset,
-            object.radius,
+            object.typ.radius(),
             Color::srgb(0., 1., 1.),
         );
     }
@@ -1848,6 +1919,18 @@ fn debug_render_map2_3d(state: Res<State>, mut gizmos: Gizmos) {
             Color::srgb(0., 1., 1.),
         );
     }
+    let pruned_walls = state.prune_geometry();
+    let all_walls = pruned_walls
+        .iter()
+        .flat_map(|linestrip| seg2s_from_linestrip(linestrip))
+        .collect::<Vec<_>>();
+    for Seg2 { start, end } in all_walls {
+        gizmos.line_2d(
+            start.map(|v| v * 20.),
+            end.map(|v| v * 20.),
+            Color::srgb(1., 1., 0.),
+        );
+    }
 }
 
 #[allow(unused)]
@@ -1966,7 +2049,7 @@ fn main() {
             (
                 //debug_render_map1,
                 //debug_render_map2,
-                //debug_render_map2_pruned,
+                // debug_render_map2_pruned,
                 //debug_render_map2_3d,
                 //debug_update,
                 grab_mouse,
