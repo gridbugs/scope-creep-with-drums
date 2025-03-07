@@ -10,7 +10,10 @@ use std::{
     mem,
 };
 
-use crate::coord_to_vec;
+use crate::{
+    coord_to_vec,
+    rooms_and_corridors::{RoomsAndCorridorsCell, RoomsAndCorridorsLevel},
+};
 
 pub struct ArtifactCoords(pub Coord, pub Coord, pub Coord);
 
@@ -253,6 +256,22 @@ impl Map1 {
             .unwrap()
     }
 
+    fn generate_rooms_and_corridors<R: Rng>(&mut self, rng: &mut R) {
+        let RoomsAndCorridorsLevel {
+            map,
+            player_spawn: _,
+            destination: _,
+            other_room_centres: _,
+        } = RoomsAndCorridorsLevel::generate(self.grid.size(), rng);
+        for (this, other) in self.grid.iter_mut().zip(map.iter()) {
+            if let RoomsAndCorridorsCell::Wall = *other {
+                *this = true;
+            } else {
+                *this = false;
+            }
+        }
+    }
+
     fn generate_cave<R: Rng>(&mut self, rng: &mut R) {
         let num_steps = 4;
         let num_clean_steps = 10;
@@ -364,10 +383,6 @@ impl Map1 {
         }
     }
 
-    pub fn generate<R: Rng>(&mut self, rng: &mut R) {
-        self.generate_cave(rng);
-    }
-
     fn open_blob(&self) -> HashSet<Coord> {
         let start = self
             .grid
@@ -463,9 +478,13 @@ impl Map1 {
             let mut item_candidates: Vec<Coord> = Vec::new();
             let mut enemy_candidates: Vec<Coord> = Vec::new();
             let dungeons = (0..3)
-                .map(|_| {
+                .map(|i| {
                     let mut map = Self::new_with_size(dungeon_size);
-                    map.generate(rng);
+                    if i == 1 {
+                        map.generate_rooms_and_corridors(rng);
+                    } else {
+                        map.generate_cave(rng);
+                    }
                     map
                 })
                 .collect::<Vec<_>>();

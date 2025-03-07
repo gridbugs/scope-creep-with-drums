@@ -18,6 +18,7 @@ use std::{
 
 mod geom;
 mod procgen;
+mod rooms_and_corridors;
 mod text;
 
 const DISPLAY_WIDTH: f32 = 960.;
