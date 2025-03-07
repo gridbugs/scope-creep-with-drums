@@ -4,6 +4,7 @@
 		<title>Scope Creep</title>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0"/>
+		<link rel="icon" type="image/x-icon" href="favicon.png">
 		<style>
 body {
 	margin: 0;
@@ -11,12 +12,37 @@ body {
 	justify-content: center;
 	align-items: center;
 	height: 100vh;
-	background-color: grey;
+	background-color: black;
+}
+div#instructions {
+	position: absolute;
+	left: 0px;
+	width: 320px;
+	padding: 10px;
+	color: rgb(0, 255, 0);
 }
 		</style>
 	</head>
 	<body>
+		<div id=instructions onclick="hideInstructions()">
+			<h2>Controls</h2>
+			<p>(click to hide)</p>
+			<p>Click over the game area to capture the mouse cursor.</p>
+			<p>Press Escape to free the mouse cursor from the game.</p>
+			<ul>
+				<li>Movement: WASD/Arrows</li>
+				<li>Turn: Mouse</li>
+				<li>Map: Tab</li>
+				<li>Restart: R</li>
+			</ul>
+			<p>If you have a 2D oscilloscape, try plugging it into your headphone jack ;)</p>
+		</div>
 		<button id="start">Play!</button>
+		<script>
+			function hideInstructions() {
+				document.getElementById("instructions").style.display = "none";
+			}
+		</script>
 		<script type="module">
 			import init from './scope-creep.js'
 			const startButton = document.querySelector('#start');
