@@ -319,6 +319,51 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> ObjectRenderer<O> {
         }
     }
 
+    fn sample_ghost_king(&mut self, object: &RenderedObject, ctx: &SigCtx) {
+        let offset = Vec2::new(object.mid, object.height * 1.8);
+        let head_size = 0.25;
+        let body_base = -2.2;
+        let wing_offset_y = -0.5;
+        for i in 0..ctx.num_samples {
+            let num_reps = 1;
+            let v = match (i / num_reps) % 7 {
+                0 => {
+                    let angle = self.rng.random::<f32>() * f32::consts::PI * 2.0;
+                    let dist = self.rng.random::<f32>() * head_size;
+                    Vec2::new(angle.cos() * dist, angle.sin() * dist) * 2.
+                }
+                1 => Vec2::new(
+                    (self.rng.random::<f32>() * 2.0 - 1.) * 1.0,
+                    body_base + (self.rng.random::<f32>() * 2.0 - 1.0) * 1.0,
+                ),
+                j @ (2 | 4 | 6) => {
+                    let offset_x = if j == 2 {
+                        -0.5
+                    } else if j == 4 {
+                        0.5
+                    } else {
+                        0.0
+                    };
+                    let angle = self.rng.random::<f32>() * f32::consts::PI * 2.0;
+                    let dist = self.rng.random::<f32>() * 0.2;
+                    Vec2::new(angle.cos() * dist, angle.sin() * dist)
+                        + Vec2::new(offset_x, wing_offset_y)
+                }
+                j @ (3 | 5) => {
+                    let offset_x = if j == 3 { -1.0 } else { 1.0 } * 2.0;
+                    Vec2::new(
+                        offset_x + (self.rng.random::<f32>() * 2.0 - 1.) * 0.3,
+                        wing_offset_y - 0.5 + (self.rng.random::<f32>() * 2.0 - 1.) * 0.2,
+                    )
+                }
+                _ => unreachable!(),
+            };
+            let mut v = v * object.height + offset;
+            v.x = v.x.clamp(object.right, object.left);
+            self.buf.push(v);
+        }
+    }
+
     fn sample_slug(&mut self, object: &RenderedObject, ctx: &SigCtx) {
         let offset = Vec2::new(object.mid, object.height * -1.);
         for i in 0..ctx.num_samples {
@@ -431,6 +476,7 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
                 ObjectType::Ghost => self.sample_ghost(&object, ctx),
                 ObjectType::Slug => self.sample_slug(&object, ctx),
                 ObjectType::WeepingAngel => self.sample_weeping_angel(&object, ctx),
+                ObjectType::GhostKing => self.sample_ghost_king(&object, ctx),
                 ObjectType::Health => self.sample_health(&object, ctx),
                 ObjectType::EndDoorLabel => self.sample_end_doors_label(&object, ctx),
                 ObjectType::Exit => self.sample_exit(&object, ctx),
@@ -597,6 +643,7 @@ struct AudioState {
 }
 
 impl AudioState {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         rendered_scene: FrameSig<FrameSigVar<RenderedScene>>,
         dist_to_nearest_ghost: FrameSig<FrameSigVar<f32>>,
@@ -801,7 +848,7 @@ impl PlayerCharacter {
             if self.health.is_zero() {
                 self.alive = false;
             }
-            self.iframes = 120;
+            self.iframes = 180;
         }
     }
 }
@@ -889,6 +936,7 @@ enum ObjectType {
     Ghost,
     Slug,
     WeepingAngel,
+    GhostKing,
     Health,
 }
 
@@ -901,6 +949,7 @@ impl ObjectType {
             Self::Artifact2 => 0.5,
             Self::Artifact3 => 0.5,
             Self::Ghost => 0.5,
+            Self::GhostKing => 0.5,
             Self::Slug => 0.5,
             Self::WeepingAngel => 1.5,
             Self::Health => 0.5,
@@ -991,6 +1040,7 @@ struct State {
     enemy_candidates: Vec<Vec2>,
     pickup_countdown: f32,
     time_spent_in_hub: f32,
+    exit_point: Vec2,
 }
 
 fn all_walls(map: &Map2, end_doors: &[Vec<Vec2>; 2]) -> Vec<Seg2> {
@@ -1079,15 +1129,16 @@ impl State {
 
     fn all_enemy_positions(&self) -> impl Iterator<Item = Vec2> {
         self.objects.iter().filter_map(|x| match x.typ {
-            ObjectType::Ghost | ObjectType::Slug | ObjectType::WeepingAngel => Some(x.position),
+            ObjectType::Ghost
+            | ObjectType::Slug
+            | ObjectType::WeepingAngel
+            | ObjectType::GhostKing => Some(x.position),
             _ => None,
         })
     }
 
     fn enemies_walk(&mut self) {
-        if self.is_player_in_hub() {
-            return;
-        }
+        let hub_centre = self.hub_rect.center();
         let all_enemy_positions = self.all_enemy_positions().collect::<Vec<_>>();
         let mut moves = Vec::new();
         'outer: for (i, o) in self.objects.iter().enumerate() {
@@ -1099,7 +1150,7 @@ impl State {
                     if let Some(walk_delta) = (self.player.position - o.position).try_normalize() {
                         let walk_delta = walk_delta * 0.01;
                         let new_position = o.position + walk_delta;
-                        moves.push((i, new_position));
+                        moves.push((i, new_position, false));
                     }
                 }
                 ObjectType::Slug => {
@@ -1117,7 +1168,7 @@ impl State {
                                 continue 'outer;
                             }
                         }
-                        moves.push((i, new_position));
+                        moves.push((i, new_position, false));
                     }
                 }
                 ObjectType::WeepingAngel => {
@@ -1132,7 +1183,7 @@ impl State {
                         if let Some(walk_delta) =
                             (self.player.position - o.position).try_normalize()
                         {
-                            let walk_delta = walk_delta * 0.05 * movement_scale;
+                            let walk_delta = walk_delta * 0.045 * movement_scale;
                             let new_position = move_object_with_wall_collision_detection(
                                 o.position,
                                 o.typ.radius(),
@@ -1140,8 +1191,15 @@ impl State {
                                 &self.map2,
                                 &self.end_doors,
                             );
-                            moves.push((i, new_position));
+                            moves.push((i, new_position, false));
                         }
+                    }
+                }
+                ObjectType::GhostKing => {
+                    if let Some(walk_delta) = (self.player.position - o.position).try_normalize() {
+                        let walk_delta = walk_delta * 0.035;
+                        let new_position = o.position + walk_delta;
+                        moves.push((i, new_position, true));
                     }
                 }
                 ObjectType::Artifact1
@@ -1152,7 +1210,13 @@ impl State {
                 | ObjectType::Exit => (),
             }
         }
-        for (i, p) in moves {
+        for (i, p, ignore_hub) in moves {
+            if (self.is_player_in_hub() || p.distance(hub_centre) < 5.0) && !ignore_hub {
+                continue;
+            }
+            if p.distance(self.exit_point) < 6.0 {
+                continue;
+            }
             self.objects[i].position = p;
         }
     }
@@ -1160,7 +1224,7 @@ impl State {
     fn distance_from_player_to_nearest_ghost(&self) -> f32 {
         let mut min_dist = f32::INFINITY;
         for o in &self.objects {
-            if let ObjectType::Ghost = o.typ {
+            if let ObjectType::Ghost | ObjectType::GhostKing = o.typ {
                 let dist = o.position.distance(self.player.position);
                 if dist < min_dist {
                     min_dist = dist;
@@ -1172,11 +1236,17 @@ impl State {
 
     fn collect_artifact(&mut self) {
         if self.num_artifacts_collected == 0 {
-            self.spawn_enemies(ObjectType::Ghost, 20);
+            self.spawn_enemies(ObjectType::Ghost, 15);
         }
         if self.num_artifacts_collected == 1 {
-            self.spawn_enemies(ObjectType::WeepingAngel, 10);
+            self.spawn_enemies(ObjectType::WeepingAngel, 9);
         }
+        if self.num_artifacts_collected == 2 {
+            let typ = ObjectType::GhostKing;
+            let position = self.player.position - self.player.facing_vec2_normalized() * 6.;
+            self.objects.push(Object { typ, position });
+        }
+
         self.num_artifacts_collected += 1;
     }
 
@@ -1200,6 +1270,7 @@ impl State {
             item_candidates,
             enemy_candidates,
         } = FullMap::make(&mut rng);
+        self.exit_point = exit_point;
         self.time_spent_in_hub = 0.;
         self.item_candidates = item_candidates;
         self.enemy_candidates = enemy_candidates;
@@ -1226,10 +1297,10 @@ impl State {
         };
         self.pickup_countdown = 0.;
         self.objects = vec![
-            //Object {
-            //    typ: ObjectType::WeepingAngel,
-            //    position: position + Vec2::new(0.0, -2.0),
-            //},
+            //   Object {
+            //       typ: ObjectType::GhostKing,
+            //       position: position + Vec2::new(0.0, -2.0),
+            //   },
             Object {
                 typ: ObjectType::EndDoorLabel,
                 position: end_doors_mid_point + Vec2::new(0.0, -1.),
@@ -1252,14 +1323,16 @@ impl State {
             },
         ];
         self.spawn_enemies(ObjectType::Slug, 30);
-        self.spawn_items(ObjectType::Health, 8);
+        self.spawn_items(ObjectType::Health, 12);
         log::info!("Generated map!");
     }
 
     fn spawn_enemies(&mut self, typ: ObjectType, quantity: usize) {
         for _ in 0..quantity {
             if let Some(position) = self.enemy_candidates.pop() {
-                self.objects.push(Object { typ, position });
+                if position.distance(self.player.position) > 2. {
+                    self.objects.push(Object { typ, position });
+                }
             }
         }
     }
@@ -1619,7 +1692,10 @@ impl State {
         let mut collected_artifacts = Vec::new();
         for (i, o) in self.objects.iter().enumerate() {
             match o.typ {
-                ObjectType::Ghost | ObjectType::Slug | ObjectType::WeepingAngel => {
+                ObjectType::Ghost
+                | ObjectType::Slug
+                | ObjectType::WeepingAngel
+                | ObjectType::GhostKing => {
                     if o.position.distance(self.player.position) < o.typ.player_collide_radius()
                         && self.player.alive
                     {
