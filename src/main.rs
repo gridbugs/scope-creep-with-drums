@@ -1479,6 +1479,7 @@ impl State {
                 }
             }
         }
+        rendered_objects.sort_by(|a, b| a.height.total_cmp(&b.height).reverse());
         RenderedScene {
             world,
             objects: rendered_objects,
