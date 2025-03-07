@@ -52,7 +52,7 @@ struct SceneTracer {
     scene: FrameSig<FrameSigVar<RenderedScene>>,
     buf: Vec<Vec2>,
     index: usize,
-    text_index: usize,
+    rng: StdRng,
 }
 
 const SCREEN_RIGHT: Seg2 = Seg2 {
@@ -99,26 +99,29 @@ impl SigT for SceneTracer {
         if scene.world.is_empty() {
             self.buf.resize(ctx.num_samples, Vec2::ZERO);
         } else {
-            while self.buf.len() < (4 * ctx.num_samples) / 5 {
+            while self.buf.len() < ctx.num_samples {
                 let mut start = true;
                 let rendered_world_seg = scene.world[self.index % scene.world.len()];
-                let brightness = 20. / rendered_world_seg.mid_depth;
-                let num_reps = (brightness as usize).clamp(1, 10) * 2;
-                for _ in 0..num_reps {
+                let thickness = if rendered_world_seg.mid_depth > 20. {
+                    0.0
+                } else {
+                    2.0 / rendered_world_seg.mid_depth
+                }
+                .min(2.);
+                let num_reps = 6;
+                for i in 0..num_reps {
                     let seg = clip_seg_within_display(rendered_world_seg.projected_seg);
-                    if start {
-                        self.buf.push(seg.start);
-                    } else {
-                        self.buf.push(seg.end);
+                    let mut v = if start { seg.start } else { seg.end };
+                    if !(i == 0 || i == num_reps - 1) {
+                        v += Vec2 {
+                            x: (self.rng.random::<f32>() * 2.0 - 1.0),
+                            y: (self.rng.random::<f32>() * 2.0 - 1.0),
+                        } * thickness;
                     }
+                    self.buf.push(v);
                     start = !start;
                 }
                 self.index += 1;
-            }
-            while self.buf.len() < ctx.num_samples {
-                let text_point = scene.text[self.text_index % scene.text.len()];
-                self.buf.push(text_point);
-                self.text_index += 1;
             }
         }
         &self.buf
@@ -172,7 +175,6 @@ lazy_static! {
             .unwrap()
     };
     static ref HEALTH_SYMBOL: Vec<Vec2> = render_text("h", Vec2::ZERO, 2, 1.);
-    static ref MANA_SYMBOL: Vec<Vec2> = render_text("s", Vec2::ZERO, 2, 1.);
 }
 #[derive(Clone)]
 struct ObjectRenderer<O: FrameSigT<Item = Option<RenderedObject>>> {
@@ -342,19 +344,6 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> ObjectRenderer<O> {
         }
     }
 
-    fn sample_mana(&mut self, object: &RenderedObject, ctx: &SigCtx) {
-        let offset = Vec2::new(object.mid, -0.5 * object.height);
-        while self.buf.len() < ctx.num_samples {
-            let mut v = (MANA_SYMBOL[self.text_index % MANA_SYMBOL.len()] - Vec2::new(-0.5, 0.))
-                * object.height
-                * 0.05
-                + offset;
-            v.x = v.x.clamp(object.right, object.left);
-            self.text_index += 1;
-            self.buf.push(v);
-        }
-    }
-
     fn sample_end_doors_label(&mut self, object: &RenderedObject, ctx: &SigCtx) {
         let offset = Vec2::new(object.mid, 0.6 * object.height);
         while self.buf.len() < ctx.num_samples {
@@ -398,7 +387,6 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
                 ObjectType::Ghost => self.sample_ghost(&object, ctx),
                 ObjectType::Slug => self.sample_slug(&object, ctx),
                 ObjectType::Health => self.sample_health(&object, ctx),
-                ObjectType::Mana => self.sample_mana(&object, ctx),
                 ObjectType::EndDoorLabel => self.sample_end_doors_label(&object, ctx),
                 ObjectType::Exit => self.sample_exit(&object, ctx),
             }
@@ -409,6 +397,7 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sig(
     scene: FrameSig<FrameSigVar<RenderedScene>>,
     dist_to_nearest_ghost: FrameSig<FrameSigVar<f32>>,
@@ -417,6 +406,7 @@ fn sig(
     door_opening: FrameSig<FrameSigVar<bool>>,
     win: FrameSig<FrameSigVar<bool>>,
     good: FrameSig<FrameSigVar<bool>>,
+    player_damage_passive: FrameSig<FrameSigVar<bool>>,
 ) -> StereoPair<SigBoxed<f32>> {
     let get_nth_object = {
         let scene = scene.clone();
@@ -437,7 +427,7 @@ fn sig(
             scene: scene.clone(),
             buf: Vec::new(),
             index: 0,
-            text_index: 0,
+            rng: StdRng::from_rng(&mut rand::rng()),
         };
         let base_scale = 0.;
         let post_scale = 0.001;
@@ -527,9 +517,17 @@ fn sig(
             .build()
             * good_env
             * 0.05;
+        let player_damage_passive_env = adsr_linear_01(player_damage_passive.clone()).build();
+        let player_damage_passive_sig = /*oscillator(Sine, 60.0)
+            .reset_offset_01(channel.circle_phase_offset_01())
+            .build()*/
+            noise::brown()
+            * player_damage_passive_env
+            * 0.01;
         (((((world + objects) * post_scale)
             + door_opening_shake
             + good_sig
+            + player_damage_passive_sig
             + (noise::brown() * ghost_noise_level)
             + (noise::brown() * damage_env * 0.05)
             + (noise::brown() * death_noise_env * 4.))
@@ -550,6 +548,7 @@ struct AudioState {
     door_opening: FrameSig<FrameSigVar<bool>>,
     win: FrameSig<FrameSigVar<bool>>,
     good: FrameSig<FrameSigVar<bool>>,
+    player_damage_passive: FrameSig<FrameSigVar<bool>>,
 }
 
 impl AudioState {
@@ -561,6 +560,7 @@ impl AudioState {
         door_opening: FrameSig<FrameSigVar<bool>>,
         win: FrameSig<FrameSigVar<bool>>,
         good: FrameSig<FrameSigVar<bool>>,
+        player_damage_passive: FrameSig<FrameSigVar<bool>>,
     ) -> Self {
         let player = Player::new()
             .unwrap()
@@ -573,6 +573,7 @@ impl AudioState {
                     door_opening.clone(),
                     win.clone(),
                     good.clone(),
+                    player_damage_passive.clone(),
                 ),
                 ConfigOwned {
                     system_latency_s: 0.0167,
@@ -589,6 +590,7 @@ impl AudioState {
             door_opening,
             win,
             good,
+            player_damage_passive,
         }
     }
 
@@ -627,6 +629,7 @@ fn setup_caw_player(world: &mut World) {
     let door_opening = frame_sig_var(true);
     let win = frame_sig_var(true);
     let good = frame_sig_var(true);
+    let player_damage_passive = frame_sig_var(true);
     world.insert_non_send_resource(AudioState::new(
         rendered_scene,
         dist_to_nearest_ghost,
@@ -635,6 +638,7 @@ fn setup_caw_player(world: &mut World) {
         door_opening,
         win,
         good,
+        player_damage_passive,
     ));
     world.insert_resource(ScopeState::new());
 }
@@ -706,7 +710,6 @@ struct PlayerCharacter {
     facing_rad: f32,
     alive: bool,
     health: Meter,
-    mana: Meter,
     iframes: u64,
 }
 
@@ -830,6 +833,7 @@ impl ConnectedPoint {
     }
 }
 
+#[allow(unused)]
 #[derive(Clone, Copy, Debug)]
 enum ObjectType {
     EndDoorLabel,
@@ -840,7 +844,6 @@ enum ObjectType {
     Ghost,
     Slug,
     Health,
-    Mana,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -898,7 +901,6 @@ fn render_text(text: &str, screen_coord: Vec2, num_reps: usize, char_width: f32)
 struct RenderedScene {
     world: Vec<RenderedWorldSeg>,
     objects: Vec<RenderedObject>,
-    text: Vec<Vec2>,
 }
 
 #[derive(Resource, Default)]
@@ -1059,8 +1061,7 @@ impl State {
                 | ObjectType::Artifact3
                 | ObjectType::Health
                 | ObjectType::EndDoorLabel
-                | ObjectType::Exit
-                | ObjectType::Mana => (),
+                | ObjectType::Exit => (),
             }
         }
         for (i, p) in moves {
@@ -1120,6 +1121,7 @@ impl State {
         self.time_spent_near_end = 0.0;
         self.restart_countdown = None;
         self.num_artifacts_collected = 0;
+        self.seen_walls.clear();
         let position = Vec2::new(32.60643, 41.605396);
         let facing_rad = 0.7207975;
         self.player = PlayerCharacter {
@@ -1127,7 +1129,6 @@ impl State {
             facing_rad,
             alive: true,
             health: Meter { current: 2, max: 2 },
-            mana: Meter { current: 2, max: 2 },
             iframes: 0,
         };
         self.pickup_countdown = 0.;
@@ -1160,7 +1161,6 @@ impl State {
         ];
         self.spawn_enemies(ObjectType::Slug, 30);
         self.spawn_items(ObjectType::Health, 8);
-        self.spawn_items(ObjectType::Mana, 8);
         log::info!("Generated map!");
     }
 
@@ -1482,24 +1482,7 @@ impl State {
         RenderedScene {
             world,
             objects: rendered_objects,
-            text: self.hud(),
         }
-    }
-
-    fn hud(&self) -> Vec<Vec2> {
-        render_text(
-            format!(
-                "h{}/{} s{}/{}",
-                self.player.health.current,
-                self.player.health.max,
-                self.player.mana.current,
-                self.player.mana.max
-            )
-            .as_str(),
-            Vec2::new(-DISPLAY_WIDTH / 2. + 10., -DISPLAY_HEIGHT / 2. + 20.),
-            4,
-            0.8,
-        )
     }
 
     fn render_map(&self) -> RenderedScene {
@@ -1525,7 +1508,7 @@ impl State {
                 let seg = s.map(|v| (v - self.player.position) * 10.);
                 let s = RenderedWorldSeg {
                     projected_seg: seg,
-                    mid_depth: 0.,
+                    mid_depth: 1.,
                 };
                 (0..1).map(move |_| s)
             })
@@ -1534,7 +1517,6 @@ impl State {
         RenderedScene {
             world,
             objects: Vec::new(),
-            text: self.hud(),
         }
     }
 
@@ -1569,15 +1551,6 @@ impl State {
                     {
                         self.pickup_countdown = 1.0;
                         self.player.health.incr();
-                        to_remove.push(i);
-                    }
-                }
-                ObjectType::Mana => {
-                    if o.position.distance(self.player.position) < OBJECT_RADIUS * 2.
-                        && !self.player.mana.is_max()
-                    {
-                        self.pickup_countdown = 1.0;
-                        self.player.mana.incr();
                         to_remove.push(i);
                     }
                 }
@@ -1626,6 +1599,10 @@ impl State {
         {
             self.start_opening_doors();
         }
+        audio_state
+            .player_damage_passive
+            .0
+            .set(!self.player.health.is_max());
     }
 
     fn start_opening_doors(&mut self) {
@@ -1825,11 +1802,7 @@ fn project_through_objects(
 
 #[allow(unused)]
 fn debug_render_map2_3d(state: Res<State>, mut gizmos: Gizmos) {
-    let RenderedScene {
-        world,
-        objects,
-        text: _,
-    } = state.render();
+    let RenderedScene { world, objects } = state.render();
     for RenderedWorldSeg {
         projected_seg: Seg2 { start, end },
         ..

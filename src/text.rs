@@ -457,15 +457,6 @@ const HEART: &[Vec2] = &[
     Vec2::new(0.5, 1.0),
 ];
 
-const STAR: &[Vec2] = &[
-    Vec2::new(0.2, 1.0),
-    Vec2::new(0.5, 0.0),
-    Vec2::new(0.8, 1.0),
-    Vec2::new(0.0, 0.4),
-    Vec2::new(1.0, 0.4),
-    Vec2::new(0.2, 1.0),
-];
-
 pub fn char_shape(ch: char) -> &'static [Vec2] {
     match ch {
         ' ' => SPACE,
@@ -509,7 +500,6 @@ pub fn char_shape(ch: char) -> &'static [Vec2] {
         '/' => SLASH,
         '.' => PERIOD,
         'h' => HEART,
-        's' => STAR,
         _ => UNKNOWN,
     }
 }
