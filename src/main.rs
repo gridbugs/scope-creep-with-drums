@@ -609,9 +609,21 @@ fn sig(
             .build()
             * good_env
             * 0.05;
-        let player_damage_passive_env = adsr_linear_01(player_damage_passive.clone()).build();
-        let player_damage_passive_sig = noise::brown() * player_damage_passive_env * 0.01;
-        (((((world + objects) * post_scale)
+        let player_damage_passive_env = adsr_linear_01(player_damage_passive.clone())
+            .build()
+            .shared();
+        let player_damage_passive_sig = noise::brown() * player_damage_passive_env.clone() * 0.01;
+        let drum_period = (0.5 - (player_damage_passive_env.clone() * 0.1)).shared();
+        let kick = periodic_trig_s(drum_period.clone())
+            .build()
+            .trig(drum::kick())
+            * 1000.;
+        let snare = periodic_trig_s(drum_period.clone())
+            .build()
+            .trig(drum::snare())
+            .filter(delay_s(drum_period / 2.0))
+            * 500.;
+        (((((world + objects + kick + snare) * post_scale)
             + door_opening_shake
             + good_sig
             + player_damage_passive_sig
@@ -948,7 +960,7 @@ impl ObjectType {
             Self::GhostKing => 0.5,
             Self::Slug => 0.5,
             Self::WeepingAngel => 1.5,
-            Self::Health => 0.5,
+            Self::Health => 1.0,
         }
     }
     fn player_collide_radius(&self) -> f32 {
