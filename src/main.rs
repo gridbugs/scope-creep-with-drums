@@ -50,7 +50,7 @@ impl HashableSeg {
 
 #[derive(Clone)]
 struct SceneTracer {
-    scene: FrameSig<FrameSigVar<RenderedScene>>,
+    scene: Sig<SigVar<RenderedScene>>,
     buf: Vec<Vec2>,
     index: usize,
     rng: StdRng,
@@ -96,7 +96,7 @@ impl SigT for SceneTracer {
 
     fn sample(&mut self, ctx: &SigCtx) -> impl Buf<Self::Item> {
         self.buf.clear();
-        let scene: RenderedScene = self.scene.frame_sample(ctx);
+        let scene: RenderedScene = self.scene.sample(ctx).iter().next().unwrap();
         if scene.world.is_empty() {
             self.buf.resize(ctx.num_samples, Vec2::ZERO);
         } else {
@@ -178,7 +178,7 @@ lazy_static! {
     static ref HEALTH_SYMBOL: Vec<Vec2> = render_text("h", Vec2::ZERO, 2, 1.);
 }
 #[derive(Clone)]
-struct ObjectRenderer<O: FrameSigT<Item = Option<RenderedObject>>> {
+struct ObjectRenderer<O: SigT<Item = Option<RenderedObject>>> {
     object: O,
     buf: Vec<Vec2>,
     sample_index: u64,
@@ -186,7 +186,7 @@ struct ObjectRenderer<O: FrameSigT<Item = Option<RenderedObject>>> {
     rng: StdRng,
 }
 
-impl<O: FrameSigT<Item = Option<RenderedObject>>> ObjectRenderer<O> {
+impl<O: SigT<Item = Option<RenderedObject>>> ObjectRenderer<O> {
     fn sample_artifact3(&mut self, object: &RenderedObject, ctx: &SigCtx) {
         let offset = Vec2::new(object.mid, -0.5 * object.height);
         for _ in 0..(ctx.num_samples / 2) {
@@ -464,12 +464,13 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> ObjectRenderer<O> {
     }
 }
 
-impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
+impl<O: SigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
     type Item = Vec2;
 
     fn sample(&mut self, ctx: &SigCtx) -> impl Buf<Self::Item> {
         self.buf.clear();
-        if let Some(object) = self.object.frame_sample(ctx) {
+        let object = self.object.sample(ctx).iter().next().unwrap();
+        if let Some(object) = object {
             match object.typ {
                 ObjectType::Artifact1 => self.sample_artifact1(&object, ctx),
                 ObjectType::Artifact2 => self.sample_artifact2(&object, ctx),
@@ -491,14 +492,14 @@ impl<O: FrameSigT<Item = Option<RenderedObject>>> SigT for ObjectRenderer<O> {
 
 #[allow(clippy::too_many_arguments)]
 fn sig(
-    scene: FrameSig<FrameSigVar<RenderedScene>>,
-    dist_to_nearest_ghost: FrameSig<FrameSigVar<f32>>,
-    player_alive: FrameSig<FrameSigVar<bool>>,
-    player_damage: FrameSig<FrameSigVar<bool>>,
-    door_opening: FrameSig<FrameSigVar<bool>>,
-    win: FrameSig<FrameSigVar<bool>>,
-    good: FrameSig<FrameSigVar<bool>>,
-    player_damage_passive: FrameSig<FrameSigVar<bool>>,
+    scene: Sig<SigVar<RenderedScene>>,
+    dist_to_nearest_ghost: Sig<SigVar<f32>>,
+    player_alive: Sig<SigVar<bool>>,
+    player_damage: Sig<SigVar<bool>>,
+    door_opening: Sig<SigVar<bool>>,
+    win: Sig<SigVar<bool>>,
+    good: Sig<SigVar<bool>>,
+    player_damage_passive: Sig<SigVar<bool>>,
 ) -> StereoPair<SigBoxed<f32>> {
     let get_nth_object = {
         let scene = scene.clone();
@@ -596,10 +597,9 @@ fn sig(
         let death_noise_env = adsr_linear_01(Sig(player_alive.clone().map(|b| !b)))
             .attack_s(2.)
             .build();
-        // XXX the gate_to_trig_rising_edge should not be necessary but is due to a bug in caw
-        let door_opening_shake = noise::white().filter(sample_and_hold(
-            Sig(periodic_trig_s(0.05).build()).gate_to_trig_rising_edge(),
-        )) * adsr_linear_01(door_opening.clone()).build()
+        let door_opening_shake = noise::white()
+            .filter(sample_and_hold(periodic_trig_s(0.05).build()))
+            * adsr_linear_01(door_opening.clone()).build()
             * 0.01;
         let good_env = adsr_linear_01(Sig(good.clone()).gate_to_trig_rising_edge())
             .release_s(1.)
@@ -610,12 +610,7 @@ fn sig(
             * good_env
             * 0.05;
         let player_damage_passive_env = adsr_linear_01(player_damage_passive.clone()).build();
-        let player_damage_passive_sig = /*oscillator(Sine, 60.0)
-            .reset_offset_01(channel.circle_phase_offset_01())
-            .build()*/
-            noise::brown()
-            * player_damage_passive_env
-            * 0.01;
+        let player_damage_passive_sig = noise::brown() * player_damage_passive_env * 0.01;
         (((((world + objects) * post_scale)
             + door_opening_shake
             + good_sig
@@ -633,27 +628,27 @@ fn sig(
 
 struct AudioState {
     player: PlayerOwned,
-    rendered_scene: FrameSig<FrameSigVar<RenderedScene>>,
-    dist_to_nearest_ghost: FrameSig<FrameSigVar<f32>>,
-    player_alive: FrameSig<FrameSigVar<bool>>,
-    player_damage: FrameSig<FrameSigVar<bool>>,
-    door_opening: FrameSig<FrameSigVar<bool>>,
-    win: FrameSig<FrameSigVar<bool>>,
-    good: FrameSig<FrameSigVar<bool>>,
-    player_damage_passive: FrameSig<FrameSigVar<bool>>,
+    rendered_scene: Sig<SigVar<RenderedScene>>,
+    dist_to_nearest_ghost: Sig<SigVar<f32>>,
+    player_alive: Sig<SigVar<bool>>,
+    player_damage: Sig<SigVar<bool>>,
+    door_opening: Sig<SigVar<bool>>,
+    win: Sig<SigVar<bool>>,
+    good: Sig<SigVar<bool>>,
+    player_damage_passive: Sig<SigVar<bool>>,
 }
 
 impl AudioState {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        rendered_scene: FrameSig<FrameSigVar<RenderedScene>>,
-        dist_to_nearest_ghost: FrameSig<FrameSigVar<f32>>,
-        player_alive: FrameSig<FrameSigVar<bool>>,
-        player_damage: FrameSig<FrameSigVar<bool>>,
-        door_opening: FrameSig<FrameSigVar<bool>>,
-        win: FrameSig<FrameSigVar<bool>>,
-        good: FrameSig<FrameSigVar<bool>>,
-        player_damage_passive: FrameSig<FrameSigVar<bool>>,
+        rendered_scene: Sig<SigVar<RenderedScene>>,
+        dist_to_nearest_ghost: Sig<SigVar<f32>>,
+        player_alive: Sig<SigVar<bool>>,
+        player_damage: Sig<SigVar<bool>>,
+        door_opening: Sig<SigVar<bool>>,
+        win: Sig<SigVar<bool>>,
+        good: Sig<SigVar<bool>>,
+        player_damage_passive: Sig<SigVar<bool>>,
     ) -> Self {
         let player = Player::new()
             .unwrap()
@@ -715,14 +710,14 @@ impl ScopeState {
 }
 
 fn setup_caw_player(world: &mut World) {
-    let rendered_scene = frame_sig_var(RenderedScene::default());
-    let dist_to_nearest_ghost = frame_sig_var(f32::INFINITY);
-    let player_alive = frame_sig_var(true);
-    let player_damage = frame_sig_var(true);
-    let door_opening = frame_sig_var(true);
-    let win = frame_sig_var(true);
-    let good = frame_sig_var(true);
-    let player_damage_passive = frame_sig_var(true);
+    let rendered_scene = sig_var(RenderedScene::default());
+    let dist_to_nearest_ghost = sig_var(f32::INFINITY);
+    let player_alive = sig_var(true);
+    let player_damage = sig_var(true);
+    let door_opening = sig_var(true);
+    let win = sig_var(true);
+    let good = sig_var(true);
+    let player_damage_passive = sig_var(true);
     world.insert_non_send_resource(AudioState::new(
         rendered_scene,
         dist_to_nearest_ghost,
